@@ -9,8 +9,8 @@ Members: Muhammad, Ryan, Rayaan
 
 - **Unified Interface**: Clean, extensible base classes for all methods
 - **Comprehensive Methods**: 
-  - **Dimensionality Reduction**: PCA, ICA, CCA, LDA, t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE, Autoencoder, VAE, CEED, GPFA, Slice TCA, LFADS
-  - **Clustering**: K-Means, GMM, DBSCAN, Spectral Clustering, Dirichlet Process Mixtures, HMM
+  - **15 Dimensionality Reduction Methods**: Linear (PCA, ICA, CCA, LDA), Manifold (t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE), Deep Learning (Autoencoder, VAE, CEED), Neural Dynamics (GPFA, Slice TCA, LFADS)
+  - **9 Clustering Methods**: K-Means, GMM, DBSCAN, Spectral, Dirichlet Process, HMM, Agglomerative, OPTICS, Mean Shift
 - **Robust Evaluation**: Multiple metrics with and without ground truth
 - **Parallel Execution**: Support for multiprocessing to speed up experiments
 - **Comprehensive Analysis**: Automated visualization and reporting tools
@@ -128,37 +128,44 @@ clustering:
       min_samples: 5
 ```
 
-## 🔬 Dimensionality Reduction Methods
+## 🔬 Implemented Methods
 
-### Linear Methods
-- **PCA**: Principal Component Analysis
-- **ICA**: Independent Component Analysis
-- **CCA**: Canonical Correlation Analysis
-- **LDA**: Linear Discriminant Analysis (supervised)
+### Dimensionality Reduction (15 Methods)
 
-### Nonlinear Methods
-- **t-SNE**: t-Distributed Stochastic Neighbor Embedding
-- **UMAP**: Uniform Manifold Approximation and Projection
-- **Isomap**: Isometric Mapping
-- **Laplacian Eigenmaps**: Spectral Embedding
-- **LLE**: Locally Linear Embedding
+#### Linear Methods
+1. **PCA** (Principal Component Analysis) - Identifies orthogonal directions of maximum variance in spike waveforms, useful for capturing the main shape variations
+2. **ICA** (Independent Component Analysis) - Separates spike waveforms into statistically independent components, effective for unmixing overlapping neural signals
+3. **CCA** (Canonical Correlation Analysis) - Finds linear relationships between spike features and other variables (e.g., behavioral data)
+4. **LDA** (Linear Discriminant Analysis) - Supervised method that maximizes separation between known neuron classes in spike feature space
 
-### Deep Learning Methods
-- **Autoencoder**: Neural network-based dimensionality reduction
-- **VAE**: Variational Autoencoder
-- **CEED**: Contrastive Encoder for Event Detection
-- **GPFA**: Gaussian Process Factor Analysis - extracts smooth neural trajectories
-- **Slice TCA**: Slice Tensor Component Analysis - identifies low-dimensional structure
-- **LFADS**: Latent Factor Analysis via Dynamical Systems - RNN-based latent dynamics
+#### Nonlinear Manifold Methods
+5. **t-SNE** (t-Distributed Stochastic Neighbor Embedding) - Preserves local neighborhood structure of spike waveforms, excellent for visualization of cluster separation
+6. **UMAP** (Uniform Manifold Approximation and Projection) - Preserves both local and global structure of spike data, faster than t-SNE with better scalability
+7. **Isomap** (Isometric Mapping) - Preserves geodesic distances in spike feature space, captures nonlinear manifold structure
+8. **Laplacian Eigenmaps** - Graph-based method that preserves local relationships between similar spike waveforms
+9. **LLE** (Locally Linear Embedding) - Assumes spike waveforms lie on a locally linear manifold, preserves local geometric properties
 
-## 🎯 Clustering Methods
+#### Deep Learning Methods
+10. **Autoencoder** - Neural network that learns compressed representations of spike waveforms through reconstruction
+11. **VAE** (Variational Autoencoder) - Probabilistic autoencoder that learns a smooth latent space of spike features with uncertainty quantification
+12. **CEED** (Contrastive Encoder for Event Detection) - Uses contrastive learning to learn discriminative spike representations
 
-- **K-Means**: Centroid-based clustering
-- **GMM**: Gaussian Mixture Model
-- **DBSCAN**: Density-Based Spatial Clustering
-- **Spectral Clustering**: Graph-based clustering
-- **Dirichlet Process Mixtures**: Bayesian nonparametric clustering
-- **HMM**: Hidden Markov Model clustering
+#### Neural Dynamics Methods
+13. **GPFA** (Gaussian Process Factor Analysis) - Extracts smooth, low-dimensional neural trajectories from population spiking activity over time
+14. **Slice TCA** (Slice Tensor Component Analysis) - Tensor decomposition method for identifying shared low-dimensional structure across neural populations
+15. **LFADS** (Latent Factor Analysis via Dynamical Systems) - RNN-based method that infers latent dynamics and denoises neural population activity
+
+### Clustering Methods (9 Methods)
+
+1. **K-Means** - Partitions spikes into K clusters by minimizing within-cluster variance; fast and effective when cluster shapes are spherical
+2. **GMM** (Gaussian Mixture Model) - Probabilistic clustering assuming spikes from each neuron follow a Gaussian distribution; provides soft cluster assignments
+3. **DBSCAN** (Density-Based Spatial Clustering) - Identifies clusters of arbitrary shape based on spike density; automatically detects outliers/noise
+4. **Spectral Clustering** - Uses graph-based similarity to find clusters; effective for non-convex cluster shapes in spike feature space
+5. **Dirichlet Process Mixture** - Bayesian nonparametric method that automatically determines the number of neurons from the data
+6. **HMM** (Hidden Markov Model) - Models temporal dependencies in spike sequences; useful when spike patterns change over time
+7. **Agglomerative Clustering** - Hierarchical clustering that builds a dendrogram of spike similarities; allows exploring clusters at multiple scales
+8. **OPTICS** (Ordering Points To Identify Clustering Structure) - Density-based method that handles varying density clusters better than DBSCAN
+9. **Mean Shift** - Non-parametric clustering that finds modes in spike feature density; automatically determines number of clusters
 
 ## 📈 Evaluation Metrics
 
