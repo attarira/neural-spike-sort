@@ -26,6 +26,10 @@ setup(
             "umap-learn>=0.5.0",
             "torch>=1.10.0",
             "hmmlearn>=0.2.7",
+            "elephant>=0.11.0",
+            "quantities>=0.13.0",
+            "neo>=0.11.0",
+            "tensorly>=0.7.0",
         ],
     },
 )

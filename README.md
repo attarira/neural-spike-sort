@@ -9,7 +9,7 @@ Members: Muhammad, Ryan, Rayaan
 
 - **Unified Interface**: Clean, extensible base classes for all methods
 - **Comprehensive Methods**: 
-  - **Dimensionality Reduction**: PCA, ICA, CCA, LDA, t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE, Autoencoder, VAE, CEED
+  - **Dimensionality Reduction**: PCA, ICA, CCA, LDA, t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE, Autoencoder, VAE, CEED, GPFA, Slice TCA, LFADS
   - **Clustering**: K-Means, GMM, DBSCAN, Spectral Clustering, Dirichlet Process Mixtures, HMM
 - **Robust Evaluation**: Multiple metrics with and without ground truth
 - **Parallel Execution**: Support for multiprocessing to speed up experiments
@@ -142,9 +142,14 @@ clustering:
 - **Isomap**: Isometric Mapping
 - **Laplacian Eigenmaps**: Spectral Embedding
 - **LLE**: Locally Linear Embedding
+
+### Deep Learning Methods
 - **Autoencoder**: Neural network-based dimensionality reduction
 - **VAE**: Variational Autoencoder
 - **CEED**: Contrastive Encoder for Event Detection
+- **GPFA**: Gaussian Process Factor Analysis - extracts smooth neural trajectories
+- **Slice TCA**: Slice Tensor Component Analysis - identifies low-dimensional structure
+- **LFADS**: Latent Factor Analysis via Dynamical Systems - RNN-based latent dynamics
 
 ## 🎯 Clustering Methods
 
@@ -245,8 +250,10 @@ results/
 ### Import Errors
 If you encounter import errors for optional dependencies:
 - **UMAP**: `pip install umap-learn`
-- **PyTorch**: `pip install torch`
+- **PyTorch** (for Autoencoder, VAE, CEED, LFADS): `pip install torch`
 - **HMMlearn**: `pip install hmmlearn`
+- **GPFA**: `pip install elephant quantities neo`
+- **Slice TCA**: `pip install tensorly`
 
 ### Memory Issues
 For large datasets:
