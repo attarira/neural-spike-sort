@@ -12,6 +12,7 @@ This script demonstrates how to:
 
 import numpy as np
 import json
+import argparse
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -156,8 +157,49 @@ def generate_synthetic_recording(
 def main():
     """Main execution function."""
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Run spike sorting experiments on synthetic recordings',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run all experiments (default)
+  python run_experiments_synthetic.py
+  
+  # Run single experiment (PCA + K-means)
+  python run_experiments_synthetic.py --single
+  
+  # Run single experiment with custom parameters
+  python run_experiments_synthetic.py --single --pca-components 20 --k-clusters 200
+        """
+    )
+    
+    parser.add_argument('--single', action='store_true',
+                       help='Run a single experiment (PCA + K-means) instead of all combinations')
+    
+    parser.add_argument('--pca-components', type=int, default=20,
+                       help='Number of PCA components for single experiment (default: 20)')
+    
+    parser.add_argument('--k-clusters', type=int, default=None,
+                       help='Number of clusters for K-means in single experiment (default: uses true k from synthetic data)')
+    
+    parser.add_argument('--subset-duration', type=float, default=1.0,
+                       help='Duration of recording subset in seconds (default: 1.0)')
+    
+    parser.add_argument('--num-units', type=int, default=200,
+                       help='Number of units/neurons to simulate (default: 200)')
+    
+    parser.add_argument('--seed', type=int, default=4776,
+                       help='Random seed for synthetic data generation (default: 4776)')
+    
+    args = parser.parse_args()
+    
     print("="*70)
     print("Spike Sorting Experiment Runner - Synthetic Recordings")
+    if args.single:
+        print("MODE: Single Experiment (PCA + K-means)")
+    else:
+        print("MODE: Full Experiment Suite")
     print("="*70)
     
     # ========================================================================
@@ -170,12 +212,12 @@ def main():
     # 1 second = 30,000 samples × 384 channels ≈ 23 MB
     X, gt_sorting, metadata = generate_synthetic_recording(
         probe_name="Neuropixels1-384",
-        num_units=200,
+        num_units=args.num_units,
         duration=300,
         sampling_frequency=30000,
-        seed=4776,
+        seed=args.seed,
         use_drift=True,  # Set to False for static recording
-        subset_duration=1  # Extract first 1 second for faster testing
+        subset_duration=args.subset_duration  # Extract subset for faster testing
     )
     
     # Note: X has shape (num_samples, num_channels)
@@ -205,60 +247,86 @@ def main():
     # Step 2: Create or load experiment configuration
     # ========================================================================
     print("\n[Step 2] Setting up experiment configuration...")
-    print(f"Using ONLY the true number of clusters: k={num_units_true}")
     
-    # Use only the true k value for clustering
+    # Determine k value to use
     true_k = num_units_true
+    k_to_use = args.k_clusters if args.k_clusters is not None else true_k
     
-    # Simplified configuration - only test true k value
-    config = {
-        'dimensionality_reduction': {
-            'PCA': [
-                {'n_components': 10},
-                {'n_components': 20},
-                {'n_components': 50},
-                {'n_components': min(100, true_k)}
-            ],
-            'UMAP': [
-                {'n_neighbors': 15, 'min_dist': 0.1, 'n_components': 10},
-                {'n_neighbors': 30, 'min_dist': 0.1, 'n_components': 10},
-                {'n_neighbors': 15, 'min_dist': 0.1, 'n_components': 20}
-            ],
-            'ICA': [
-                {'n_components': 10},
-                {'n_components': 20}
-            ]
-        },
-        'clustering': {
-            'KMeans': [
-                {'n_clusters': true_k}  # Only true k value
-            ],
-            'GMM': [
-                {'n_components': true_k}  # Only true k value
-            ],
-            'SpectralClustering': [
-                {'n_clusters': true_k} if true_k <= 200 else None  # Only true k if reasonable
-            ]
+    if args.k_clusters is not None:
+        print(f"Using specified k={k_to_use} (true k={true_k})")
+    else:
+        print(f"Using true number of clusters: k={k_to_use}")
+    
+    # Configure based on single vs. full experiment mode
+    if args.single:
+        # Single experiment: PCA + K-means only
+        print("Single experiment mode: PCA + K-means")
+        config = {
+            'dimensionality_reduction': {
+                'PCA': [
+                    {'n_components': args.pca_components}
+                ]
+            },
+            'clustering': {
+                'KMeans': [
+                    {'n_clusters': k_to_use}
+                ]
+            }
         }
-    }
-    
-    # Remove None entries (in case true_k > 200 for SpectralClustering)
-    if None in config['clustering']['SpectralClustering']:
-        config['clustering']['SpectralClustering'] = [
-            x for x in config['clustering']['SpectralClustering'] if x is not None
-        ]
-    
-    print(f"\nConfiguration summary:")
-    print(f"  Dimensionality reduction methods: {list(config['dimensionality_reduction'].keys())}")
-    print(f"  Clustering methods: {list(config['clustering'].keys())}")
-    print(f"  Using k = {true_k} (true number of clusters) for all clustering methods")
+        print(f"\nConfiguration:")
+        print(f"  Dimensionality reduction: PCA with {args.pca_components} components")
+        print(f"  Clustering: K-means with k={k_to_use}")
+    else:
+        # Full experiment suite: test multiple methods
+        config = {
+            'dimensionality_reduction': {
+                'PCA': [
+                    {'n_components': 10},
+                    {'n_components': 20},
+                    {'n_components': 50},
+                    {'n_components': min(100, true_k)}
+                ],
+                'UMAP': [
+                    {'n_neighbors': 15, 'min_dist': 0.1, 'n_components': 10},
+                    {'n_neighbors': 30, 'min_dist': 0.1, 'n_components': 10},
+                    {'n_neighbors': 15, 'min_dist': 0.1, 'n_components': 20}
+                ],
+                'ICA': [
+                    {'n_components': 10},
+                    {'n_components': 20}
+                ]
+            },
+            'clustering': {
+                'KMeans': [
+                    {'n_clusters': true_k}  # Only true k value
+                ],
+                'GMM': [
+                    {'n_components': true_k}  # Only true k value
+                ],
+                'SpectralClustering': [
+                    {'n_clusters': true_k} if true_k <= 200 else None  # Only true k if reasonable
+                ]
+            }
+        }
+        
+        # Remove None entries (in case true_k > 200 for SpectralClustering)
+        if None in config['clustering']['SpectralClustering']:
+            config['clustering']['SpectralClustering'] = [
+                x for x in config['clustering']['SpectralClustering'] if x is not None
+            ]
+        
+        print(f"\nConfiguration summary:")
+        print(f"  Dimensionality reduction methods: {list(config['dimensionality_reduction'].keys())}")
+        print(f"  Clustering methods: {list(config['clustering'].keys())}")
+        print(f"  Using k = {true_k} (true number of clusters) for all clustering methods")
     
     # Create results directory if it doesn't exist
     results_dir = Path('./results')
     results_dir.mkdir(parents=True, exist_ok=True)
     
     # Save configuration for reference
-    save_config(config, './results/experiment_config_real.yaml')
+    config_filename = './results/experiment_config_single.yaml' if args.single else './results/experiment_config_full.yaml'
+    save_config(config, config_filename)
     
     # ========================================================================
     # Step 3: Initialize experiment runner
@@ -277,11 +345,13 @@ def main():
     print("\n[Step 4] Running experiments...")
     print("Note: This may take a while depending on data size and configuration")
     
+    dataset_name = f'synthetic_single_{num_units_true}units' if args.single else f'synthetic_full_{num_units_true}units'
+    
     results = runner.run_experiments(
         X=X,
         config=config,
         y=y,  # None - no ground truth labels for time points (would need spike detection)
-        dataset_name=f'synthetic_recording_{num_units_true}units'
+        dataset_name=dataset_name
     )
     
     # ========================================================================
@@ -311,27 +381,50 @@ def main():
     print("\nSummary Statistics:")
     print(analyzer.get_summary_statistics())
     
-    # Get best configurations
-    print("\nTop 5 Configurations (by Silhouette Score):")
-    print(analyzer.get_best_configurations(metric='silhouette_score', n_top=5))
-    
-    # All results use the true k value
-    print(f"\n{'='*70}")
-    print(f"Results using true number of clusters (k={num_units_true}):")
-    print(f"{'='*70}")
-    successful_results = analyzer.get_successful_results()
-    if successful_results:
-        for r in sorted(successful_results, 
-                       key=lambda x: x.get('evaluation', {}).get('silhouette_score', -999), 
-                       reverse=True)[:10]:
+    if args.single:
+        # For single experiment, show detailed results
+        successful_results = analyzer.get_successful_results()
+        if successful_results:
+            r = successful_results[0]
             dim_method = r['dim_reduction_method']
             dim_params = r['dim_reduction_params']
             clust_method = r['clustering_method']
-            score = r.get('evaluation', {}).get('silhouette_score', 'N/A')
-            print(f"\n  {dim_method} {dim_params} → {clust_method}:")
-            print(f"    Silhouette Score: {score:.4f}")
+            evaluation = r.get('evaluation', {})
+            
+            print(f"\n{'='*70}")
+            print(f"Single Experiment Results:")
+            print(f"{'='*70}")
+            print(f"\nConfiguration:")
+            print(f"  Dimensionality Reduction: {dim_method} {dim_params}")
+            print(f"  Clustering: {clust_method} {r.get('clustering_params', {})}")
+            print(f"\nEvaluation Metrics:")
+            for metric_name, metric_value in evaluation.items():
+                if metric_value is not None:
+                    print(f"  {metric_name}: {metric_value:.4f}")
+        else:
+            print("\nExperiment failed - no results found")
     else:
-        print("  No successful results found")
+        # For full experiments, show summary
+        print("\nTop 5 Configurations (by Silhouette Score):")
+        print(analyzer.get_best_configurations(metric='silhouette_score', n_top=5))
+        
+        # All results use the true k value
+        print(f"\n{'='*70}")
+        print(f"Results using true number of clusters (k={num_units_true}):")
+        print(f"{'='*70}")
+        successful_results = analyzer.get_successful_results()
+        if successful_results:
+            for r in sorted(successful_results, 
+                           key=lambda x: x.get('evaluation', {}).get('silhouette_score', -999), 
+                           reverse=True)[:10]:
+                dim_method = r['dim_reduction_method']
+                dim_params = r['dim_reduction_params']
+                clust_method = r['clustering_method']
+                score = r.get('evaluation', {}).get('silhouette_score', 'N/A')
+                print(f"\n  {dim_method} {dim_params} → {clust_method}:")
+                print(f"    Silhouette Score: {score:.4f}")
+        else:
+            print("  No successful results found")
     
     # Note: No per-sample ground truth labels available since we're clustering time points
     
@@ -340,29 +433,31 @@ def main():
     # ========================================================================
     print("\n[Step 7] Generating visualizations...")
     
-    # Create performance heatmap
-    analyzer.create_performance_heatmap(
-        metric='silhouette_score',
-        save_path='./results/heatmap_silhouette_real.png'
-    )
-    
-    # Create method comparison plots
-    analyzer.create_method_comparison_barplot(
-        metric='silhouette_score',
-        method_type='dim_reduction',
-        save_path='./results/barplot_dimreduction_real.png'
-    )
-    
-    analyzer.create_method_comparison_barplot(
-        metric='silhouette_score',
-        method_type='clustering',
-        save_path='./results/barplot_clustering_real.png'
-    )
-    
-    # Create runtime comparison
-    analyzer.create_runtime_comparison(
-        save_path='./results/runtime_comparison_real.png'
-    )
+    if not args.single:
+        # Only create comparison plots for full experiments
+        # Create performance heatmap
+        analyzer.create_performance_heatmap(
+            metric='silhouette_score',
+            save_path='./results/heatmap_silhouette_synthetic.png'
+        )
+        
+        # Create method comparison plots
+        analyzer.create_method_comparison_barplot(
+            metric='silhouette_score',
+            method_type='dim_reduction',
+            save_path='./results/barplot_dimreduction_synthetic.png'
+        )
+        
+        analyzer.create_method_comparison_barplot(
+            metric='silhouette_score',
+            method_type='clustering',
+            save_path='./results/barplot_clustering_synthetic.png'
+        )
+        
+        # Create runtime comparison
+        analyzer.create_runtime_comparison(
+            save_path='./results/runtime_comparison_synthetic.png'
+        )
     
     # ========================================================================
     # Step 8: Generate full report
@@ -372,28 +467,30 @@ def main():
     metrics_to_analyze = ['silhouette_score', 'davies_bouldin_index', 
                          'calinski_harabasz_index']
     
-    # Note: No ground truth metrics available
-    analyzer.generate_full_report(
-        output_dir='./results/full_report_real',
-        metrics=metrics_to_analyze
-    )
-    
-    # ========================================================================
-    # Step 9: Export summary tables
-    # ========================================================================
-    print("\n[Step 9] Exporting summary tables...")
-    
-    analyzer.export_summary_table(
-        output_path='./results/summary_table_real.csv',
-        format='csv',
-        metric='silhouette_score'
-    )
-    
-    analyzer.export_summary_table(
-        output_path='./results/summary_table_real.tex',
-        format='latex',
-        metric='silhouette_score'
-    )
+    if not args.single:
+        # Only generate full reports for full experiments
+        # Note: No ground truth metrics available
+        analyzer.generate_full_report(
+            output_dir='./results/full_report_synthetic',
+            metrics=metrics_to_analyze
+        )
+        
+        # ========================================================================
+        # Step 9: Export summary tables
+        # ========================================================================
+        print("\n[Step 9] Exporting summary tables...")
+        
+        analyzer.export_summary_table(
+            output_path='./results/summary_table_synthetic.csv',
+            format='csv',
+            metric='silhouette_score'
+        )
+        
+        analyzer.export_summary_table(
+            output_path='./results/summary_table_synthetic.tex',
+            format='latex',
+            metric='silhouette_score'
+        )
     
     print("\n" + "="*70)
     print("Experiment completed successfully!")
