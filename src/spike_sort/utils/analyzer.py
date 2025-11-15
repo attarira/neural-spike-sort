@@ -113,6 +113,9 @@ class ResultsAnalyzer:
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns
         return self.df[numeric_cols].describe()
     
+    def get_successful_results(self) -> List[Dict[str, Any]]:
+        return [r for r in self.results if r.get('success')]
+    
     def get_best_configurations(self, 
                                metric: str = 'silhouette_score',
                                n_top: int = 10,
