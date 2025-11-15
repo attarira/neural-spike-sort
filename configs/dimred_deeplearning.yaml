@@ -1,0 +1,51 @@
+dimensionality_reduction:
+  Autoencoder:
+    - encoding_dim: 10
+      hidden_dim: 64
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+    - encoding_dim: 20
+      hidden_dim: 64
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+  VAE:
+    - encoding_dim: 10
+      hidden_dim: 64
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+    - encoding_dim: 20
+      hidden_dim: 64
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+  CEED:
+    - encoding_dim: 10
+      hidden_dim: 64
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+      temperature: 0.5
+    - encoding_dim: 20
+      hidden_dim: 64
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+      temperature: 0.5
+  LFADS:
+    - latent_dim: 10
+      hidden_dim: 64
+      num_layers: 2
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+      sequence_length: 10
+    - latent_dim: 20
+      hidden_dim: 64
+      num_layers: 2
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+      sequence_length: 10

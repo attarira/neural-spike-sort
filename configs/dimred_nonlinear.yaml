@@ -1,0 +1,31 @@
+dimensionality_reduction:
+  UMAP:
+    - n_neighbors: 15
+      min_dist: 0.1
+      n_components: 10
+    - n_neighbors: 30
+      min_dist: 0.1
+      n_components: 10
+    - n_neighbors: 15
+      min_dist: 0.5
+      n_components: 10
+  TSNE:
+    - perplexity: 30
+      n_components: 2
+    - perplexity: 50
+      n_components: 2
+    - perplexity: 30
+      n_components: 3
+  Isomap:
+    - n_neighbors: 5
+      n_components: 10
+    - n_neighbors: 10
+      n_components: 10
+  LLE:
+    - n_neighbors: 10
+      n_components: 10
+    - n_neighbors: 20
+      n_components: 10
+  LaplacianEigenmaps:
+    - n_components: 10
+      n_neighbors: 10
