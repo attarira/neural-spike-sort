@@ -164,9 +164,11 @@ def main():
             best = analyzer.get_best_configurations(metric=metric, n_top=1)
             if best is not None and not best.empty:
                 row = best.iloc[0]
+                dim_params = row.get('dim_reduction_params', row.get('dim_params_str', '{}'))
+                clust_params = row.get('clustering_params', row.get('clust_params_str', '{}'))
                 print(f"  Best {metric}: {row[metric]:.4f}")
-                print(f"    Dim. Reduction: {row['dim_reduction_method']} {row['dim_reduction_params']}")
-                print(f"    Clustering: {row['clustering_method']} {row['clustering_params']}")
+                print(f"    Dim. Reduction: {row['dim_reduction_method']} {dim_params}")
+                print(f"    Clustering: {row['clustering_method']} {clust_params}")
 
 if __name__ == "__main__":
     main()

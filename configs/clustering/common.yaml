@@ -34,6 +34,26 @@ clustering:
       min_samples: 5
     - eps: 0.5
       min_samples: 10
+    - eps: 0.4
+      min_samples: 5
+    - eps: 0.6
+      min_samples: 5
+    - eps: 1.0
+      min_samples: 5
+    - eps: 0.4
+      min_samples: 10
+    - eps: 0.6
+      min_samples: 10
+    - eps: 1.0
+      min_samples: 10
+    - eps: 0.4
+      min_samples: 15
+    - eps: 0.6
+      min_samples: 15
+    - eps: 0.8
+      min_samples: 15
+    - eps: 1.0
+      min_samples: 15
   DirichletProcess:
     - n_components: 20
       covariance_type: full
