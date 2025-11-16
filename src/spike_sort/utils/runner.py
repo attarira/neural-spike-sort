@@ -19,6 +19,8 @@ import yaml
 from spike_sort.dimensionality_reduction import create_reducer
 from spike_sort.clustering import create_clustering
 from spike_sort.evaluation import evaluate_all
+import hashlib
+import json as _json
 
 
 class ExperimentRunner:
@@ -29,7 +31,8 @@ class ExperimentRunner:
     def __init__(self, 
                  output_dir: str = './results',
                  n_jobs: int = 1,
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 silent_errors: bool = True):
         """
         Initialize the experiment runner.
         
@@ -42,6 +45,7 @@ class ExperimentRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.n_jobs = n_jobs
         self.verbose = verbose
+        self.silent_errors = silent_errors
         self.results = []
         self.experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
@@ -65,8 +69,12 @@ class ExperimentRunner:
                 config = json.load(f)
         else:
             raise ValueError(f"Unsupported config format: {config_path.suffix}")
-        
         return config
+
+    def load_and_merge(self, dim_config_path: str, clust_config_path: str) -> Dict[str, Any]:
+        dim = self.load_config(dim_config_path)
+        clust = self.load_config(clust_config_path)
+        return self.merge_configs(dim, clust)
     
     def _run_single_experiment(self,
                                X: np.ndarray,
@@ -137,7 +145,7 @@ class ExperimentRunner:
             
         except Exception as e:
             result['error'] = str(e)
-            if self.verbose:
+            if self.verbose and not self.silent_errors:
                 print(f"Experiment {experiment_idx} failed: {str(e)}")
         
         return result
@@ -159,22 +167,46 @@ class ExperimentRunner:
         Returns:
             List of result dictionaries
         """
-        # Generate all experiment combinations
-        experiments = []
-        experiment_idx = 0
-        
+        dim_combos = []
         for dim_method, dim_params_list in config.get('dimensionality_reduction', {}).items():
             for dim_params in dim_params_list:
-                for clust_method, clust_params_list in config.get('clustering', {}).items():
-                    for clust_params in clust_params_list:
-                        experiments.append({
-                            'idx': experiment_idx,
-                            'dim_method': dim_method,
-                            'dim_params': dim_params,
-                            'clust_method': clust_method,
-                            'clust_params': clust_params
-                        })
-                        experiment_idx += 1
+                # Skip invalid CCA params where n_components > 1
+                if dim_method.lower() == 'cca' and dim_params.get('n_components', 1) > 1:
+                    continue
+                dim_combos.append((dim_method, dim_params))
+        embeddings_cache: Dict[str, Dict[str, Any]] = {}
+        for dim_method, dim_params in dim_combos:
+            key = f"{dim_method}:{_json.dumps(dim_params, sort_keys=True)}"
+            if key in embeddings_cache:
+                continue
+            reducer = create_reducer(dim_method, **dim_params)
+            if reducer is None:
+                continue
+            X_reduced = reducer.fit_transform(X, y)
+            if X_reduced is None:
+                continue
+            embeddings_cache[key] = {
+                'X_reduced': X_reduced,
+                'metadata': reducer.get_metadata(),
+                'reduced_shape': X_reduced.shape,
+                'dim_method': dim_method,
+                'dim_params': dim_params
+            }
+        experiments = []
+        experiment_idx = 0
+        for dim_method, dim_params in dim_combos:
+            key = f"{dim_method}:{_json.dumps(dim_params, sort_keys=True)}"
+            if key not in embeddings_cache:
+                continue
+            for clust_method, clust_params_list in config.get('clustering', {}).items():
+                for clust_params in clust_params_list:
+                    experiments.append({
+                        'idx': experiment_idx,
+                        'cache_key': key,
+                        'clust_method': clust_method,
+                        'clust_params': clust_params
+                    })
+                    experiment_idx += 1
         
         if self.verbose:
             print(f"\n{'='*70}")
@@ -183,36 +215,73 @@ class ExperimentRunner:
             print(f"Experiment ID: {self.experiment_id}")
             print(f"{'='*70}\n")
         
-        # Run experiments
+        def run_with_cache(exp):
+            cache = embeddings_cache.get(exp['cache_key'], None)
+            base = {
+                'experiment_idx': exp['idx'],
+                'dim_reduction_method': cache['dim_method'] if cache else None,
+                'dim_reduction_params': cache['dim_params'] if cache else None,
+                'clustering_method': exp['clust_method'],
+                'clustering_params': exp['clust_params'],
+                'timestamp': datetime.now().isoformat(),
+                'success': False
+            }
+            if cache is None:
+                base['error'] = 'Embedding not available'
+                return base
+            try:
+                X_reduced = cache['X_reduced']
+                params = dict(exp['clust_params'])
+                method = exp['clust_method']
+                n_samples = X_reduced.shape[0]
+                n_features = X_reduced.shape[1]
+                if method in ('HMM',):
+                    if n_features > 64 or params.get('n_components', 1) > max(50, n_samples // 10):
+                        base['error'] = 'HMM skipped due to high dimensionality/too many components'
+                        return base
+                if method in ('GMM', 'GaussianMixture', 'DirichletProcess', 'DPM'):
+                    nc = params.get('n_components', 1)
+                    if params.get('covariance_type', 'full') == 'full':
+                        if (nc * n_features) > (n_samples * 10):
+                            params['covariance_type'] = 'diag'
+                            params['reg_covar'] = max(params.get('reg_covar', 1e-4), 1e-3)
+                clusterer = create_clustering(method, **params)
+                if clusterer is None:
+                    base['error'] = f"Failed to create clusterer: {method}"
+                    return base
+                labels = clusterer.fit_predict(X_reduced)
+                if labels is None:
+                    base['error'] = 'Clustering failed'
+                    return base
+                base['dim_reduction_metadata'] = cache['metadata']
+                base['reduced_shape'] = cache['reduced_shape']
+                base['clustering_metadata'] = clusterer.get_metadata()
+                # Avoid metric errors for degenerate labelings
+                n_unique = len(np.unique(labels))
+                if 2 <= n_unique <= (n_samples - 1):
+                    evaluation_results = evaluate_all(X_reduced, labels, y)
+                else:
+                    evaluation_results = {}
+                base['evaluation'] = evaluation_results
+                base['success'] = True
+            except Exception as e:
+                base['error'] = str(e)
+                if self.verbose:
+                    print(f"Experiment {exp['idx']} failed: {str(e)}")
+            return base
+
         if self.n_jobs == 1:
-            # Sequential execution with progress bar
             results = []
             for exp in tqdm(experiments, desc="Running experiments", disable=not self.verbose):
-                result = self._run_single_experiment(
-                    X, y,
-                    exp['dim_method'], exp['dim_params'],
-                    exp['clust_method'], exp['clust_params'],
-                    exp['idx']
-                )
+                result = run_with_cache(exp)
                 results.append(result)
-                
-                # Save intermediate results
                 self._save_intermediate_result(result, dataset_name)
         else:
-            # Parallel execution
             if self.verbose:
                 print(f"Running experiments in parallel with {self.n_jobs} jobs...")
-            
             results = Parallel(n_jobs=self.n_jobs)(
-                delayed(self._run_single_experiment)(
-                    X, y,
-                    exp['dim_method'], exp['dim_params'],
-                    exp['clust_method'], exp['clust_params'],
-                    exp['idx']
-                ) for exp in tqdm(experiments, desc="Running experiments", disable=not self.verbose)
+                delayed(run_with_cache)(exp) for exp in tqdm(experiments, desc="Running experiments", disable=not self.verbose)
             )
-            
-            # Save all intermediate results
             for result in results:
                 self._save_intermediate_result(result, dataset_name)
         
@@ -229,6 +298,13 @@ class ExperimentRunner:
             self._print_summary(results)
         
         return results
+
+    def merge_configs(self, dim_config: Dict[str, Any], clust_config: Dict[str, Any]) -> Dict[str, Any]:
+        merged = {
+            'dimensionality_reduction': dim_config.get('dimensionality_reduction', {}),
+            'clustering': clust_config.get('clustering', {})
+        }
+        return merged
     
     def _save_intermediate_result(self, result: Dict[str, Any], dataset_name: str):
         """Save a single result to avoid losing data on failure."""

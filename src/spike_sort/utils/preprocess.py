@@ -3,6 +3,8 @@ from spikeinterface.sortingcomponents.peak_detection import detect_peaks
 import spikeinterface.extractors as se
 from spikeinterface.core import extract_waveforms
 from pathlib import Path
+import contextlib
+import os
 
 def detect_spikes(recording,
                   method='locally_exclusive',
@@ -18,7 +20,7 @@ def detect_spikes(recording,
         detect_threshold=detect_threshold,
         exclude_sweep_ms=exclude_sweep_ms,
         n_jobs=n_jobs,
-        progress_bar=progress_bar
+        progress_bar=False
     )
     return peaks
 
@@ -48,7 +50,17 @@ def extract_waveform_features(recording,
     sorting = se.NumpySorting.from_samples_and_labels([times], [labels], sampling_frequency=fs)
     ts = np.datetime64('now').astype('datetime64[ms]').astype(object).strftime('%Y%m%d_%H%M%S')
     folder = Path(f"results/waveforms_extractor_tmp_{ts}")
-    we = extract_waveforms(recording, sorting, folder=str(folder), ms_before=ms_before, ms_after=ms_after, max_spikes_per_unit=max_spikes_per_unit, load_if_exists=None)
+    with open(os.devnull, 'w') as devnull:
+        with contextlib.redirect_stdout(devnull):
+            we = extract_waveforms(
+                recording,
+                sorting,
+                folder=str(folder),
+                ms_before=ms_before,
+                ms_after=ms_after,
+                max_spikes_per_unit=max_spikes_per_unit,
+                load_if_exists=None,
+            )
     unit_ids = sorting.get_unit_ids()
     features = []
     peak_locations = []

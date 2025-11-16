@@ -75,6 +75,6 @@ temp/
 # ONE-api files
 **/.rest
 
-# Playground IBL data
+# IBL data
 playground/IBL_data
-/IBL DATA
+/IBL_DATA

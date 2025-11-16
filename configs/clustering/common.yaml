@@ -34,3 +34,38 @@ clustering:
       min_samples: 5
     - eps: 0.5
       min_samples: 10
+  DirichletProcess:
+    - n_components: 20
+      covariance_type: full
+      reg_covar: 0.0001
+      max_iter: 200
+    - n_components: 50
+      covariance_type: full
+      reg_covar: 0.0001
+      max_iter: 200
+  HMM:
+    - n_components: 3
+      n_iter: 100
+      covariance_type: full
+    - n_components: 5
+      n_iter: 150
+      covariance_type: full
+  Agglomerative:
+    - n_clusters: 3
+      linkage: ward
+    - n_clusters: 5
+      linkage: ward
+    - n_clusters: 7
+      linkage: ward
+  OPTICS:
+    - min_samples: 5
+      xi: 0.05
+      min_cluster_size: 0.05
+    - min_samples: 10
+      xi: 0.05
+      min_cluster_size: 0.05
+  MeanShift:
+    - bandwidth: 1.0
+      bin_seeding: true
+    - bandwidth: 2.0
+      bin_seeding: true
