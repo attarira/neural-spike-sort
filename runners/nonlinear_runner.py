@@ -45,7 +45,9 @@ def main():
     print_header("Nonlinear Runner")
 
     if args.mode == "synthetic":
+        # Synthetic dataset: enables aligning fixed-k clusterers via true_k
         static_rec, drift_rec, gt_sorting = create_synthetic_recording(args.num_units)
+        # Slice for faster iteration when desired
         recording, gt_sorting = slice_recording(static_rec, args.subset_duration, 30000, gt_sorting)
         print("Recording ready:")
         print(f"  Duration: {args.subset_duration} seconds")
@@ -53,10 +55,12 @@ def main():
         print(f"  Channels: {recording.get_num_channels()}")
         print(f"  Sampling rate: {recording.get_sampling_frequency()} Hz")
         print(f"\nGround truth: {gt_sorting.get_num_units()} units")
+        # Preprocess and match spikes to ground truth labels
         X, peak_locations, meta = prepare_spike_features(recording, args.threshold)
         y = match_ground_truth(gt_sorting, peak_locations, recording)
         dataset_name = f"synthetic_nonlinear_{gt_sorting.get_num_units()}units"
     else:
+        # Real dataset: no ground truth; ensure recording folder provided
         if args.recording_folder is None:
             raise ValueError("recording-folder is required for real mode")
         recording = load_real_recording(args.recording_folder)
@@ -66,24 +70,31 @@ def main():
         print(f"  Samples: {recording.get_num_frames():,}")
         print(f"  Channels: {recording.get_num_channels()}")
         print(f"  Sampling rate: {recording.get_sampling_frequency()} Hz")
+        # Preprocess features only
         X, peak_locations, meta = prepare_spike_features(recording, args.threshold)
         y = None
         dataset_name = "real_nonlinear"
 
+    # Inspect features and cast to float64 for numerical stability
     print_spike_feature_info(X)
     X = X.astype(np.float64, copy=False)
 
+    # Initialize runner and load configs
     runner = ExperimentRunner(output_dir=args.output_dir, n_jobs=args.n_jobs, verbose=True, silent_errors=True)
     config = runner.load_and_merge(args.dim_config, args.clust_config)
+    # Align fixed-k clusterers to synthetic true_k where applicable
     true_k = None
     if args.mode == "synthetic":
         true_k = int(dataset_name.split("_")[-1].replace("units", ""))
     config = align_true_k(config, true_k)
+    # Execute all experiment combinations and persist outputs
     results = runner.run_experiments(X=X, config=config, y=y, dataset_name=dataset_name)
     runner.save_results()
 
+    # Save metadata for reproducibility and post-hoc debugging
     save_metadata(Path(args.output_dir), recording, meta, args.mode, args.subset_duration, "nonlinear_runner_metadata.json")
 
+    # Summarize results and best configs by key metrics
     analyze_and_print(results)
 
 

@@ -45,43 +45,56 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     """Entrypoint for running the linear pipeline on synthetic or real data."""
+    # Parse arguments and initialize logging for visibility
     args = parse_args()
     setup_logging(args.debug)
+    # Header delineates run in console logs
     print_header("Linear Runner")
 
     if args.mode == "synthetic":
+        # Synthetic: known unit count enables true_k alignment for fixed-k methods
         static_rec, drift_rec, gt_sorting = create_synthetic_recording(args.num_units)
+        # Slice dataset to subset duration for faster iteration when desired
         recording, gt_sorting = slice_recording(static_rec, args.subset_duration, 30000, gt_sorting)
         print_recording_info(recording, args.subset_duration)
         print(f"\nGround truth: {gt_sorting.get_num_units()} units")
+        # Preprocess recording to obtain spike features and labels
         X, peak_locations, meta = prepare_spike_features(recording, args.threshold)
         y = match_ground_truth(gt_sorting, peak_locations, recording)
+        # Derive dataset name including unit count for traceability
         dataset_name = f"synthetic_linear_{gt_sorting.get_num_units()}units"
     else:
+        # Real mode: requires path to a saved extractor; no ground truth available
         if args.recording_folder is None:
             raise ValueError("recording-folder is required for real mode")
         recording = load_real_recording(args.recording_folder)
         recording, _ = slice_recording(recording, args.subset_duration)
         print_recording_info(recording, args.subset_duration)
+        # Extract spike features; labels remain None
         X, peak_locations, meta = prepare_spike_features(recording, args.threshold)
         y = None
         dataset_name = "real_linear"
 
+    # Inspect feature matrix and cast to float64 for numerical stability
     print_spike_feature_info(X)
     X = X.astype(np.float64, copy=False)
 
+    # Initialize ExperimentRunner and load/merge configs
     runner = ExperimentRunner(output_dir=args.output_dir, n_jobs=args.n_jobs, verbose=True, silent_errors=True)
     config = runner.load_and_merge(args.dim_config, args.clust_config)
 
+    # Align fixed-k clusterers to synthetic ground truth (if available)
     true_k = None
     if args.mode == "synthetic":
         # Use units from dataset name for consistency with previous runs
         true_k = int(dataset_name.split("_")[-1].replace("units", ""))
     config = align_true_k(config, true_k)
 
+    # Execute configured experiments and persist outputs
     results = runner.run_experiments(X=X, config=config, y=y, dataset_name=dataset_name)
     runner.save_results()
 
+    # Save metadata for reproducibility and summarize results
     save_metadata(Path(args.output_dir), recording, meta, args.mode, args.subset_duration, "linear_runner_metadata.json")
     analyze_and_print(results)
 
