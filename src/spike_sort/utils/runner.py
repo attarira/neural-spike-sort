@@ -5,6 +5,7 @@ Orchestrates experiments across multiple dimensionality reduction and clustering
 """
 
 import os
+import logging
 import json
 import pickle
 import time
@@ -72,6 +73,7 @@ class ExperimentRunner:
         return config
 
     def load_and_merge(self, dim_config_path: str, clust_config_path: str) -> Dict[str, Any]:
+        """Load two config files and merge into a single configuration dict."""
         dim = self.load_config(dim_config_path)
         clust = self.load_config(clust_config_path)
         return self.merge_configs(dim, clust)
@@ -167,6 +169,10 @@ class ExperimentRunner:
         Returns:
             List of result dictionaries
         """
+        # Input validation for clarity and early failure
+        assert isinstance(X, np.ndarray) and X.ndim == 2 and X.shape[0] > 0, "X must be a non-empty 2D array"
+        assert isinstance(config, dict) and 'dimensionality_reduction' in config and 'clustering' in config, "Invalid config structure"
+
         dim_combos = []
         for dim_method, dim_params_list in config.get('dimensionality_reduction', {}).items():
             for dim_params in dim_params_list:
@@ -214,6 +220,7 @@ class ExperimentRunner:
             print(f"Data shape: {X.shape}")
             print(f"Experiment ID: {self.experiment_id}")
             print(f"{'='*70}\n")
+            logging.debug(f"Prepared {len(dim_combos)} embedding combos; cache size={len(embeddings_cache)}")
         
         def run_with_cache(exp):
             cache = embeddings_cache.get(exp['cache_key'], None)

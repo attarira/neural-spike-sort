@@ -5,14 +5,31 @@ from spikeinterface.core import extract_waveforms
 from pathlib import Path
 import contextlib
 import os
+from typing import Tuple, Dict, Any
+
+TINY = 1e-8
 
 def detect_spikes(recording,
-                  method='locally_exclusive',
-                  peak_sign='neg',
-                  detect_threshold=5.0,
-                  exclude_sweep_ms=0.1,
-                  n_jobs=1,
-                  progress_bar=True):
+                  method: str = 'locally_exclusive',
+                  peak_sign: str = 'neg',
+                  detect_threshold: float = 5.0,
+                  exclude_sweep_ms: float = 0.1,
+                  n_jobs: int = 1,
+                  progress_bar: bool = True):
+    """Detect spike peaks on the given recording.
+
+    Args:
+        recording: SpikeInterface recording extractor
+        method: Peak detection method
+        peak_sign: 'pos' or 'neg'
+        detect_threshold: Detection threshold
+        exclude_sweep_ms: Refractory window in ms to avoid duplicates
+        n_jobs: Parallel jobs for detection
+        progress_bar: Show progress bar if True
+
+    Returns:
+        Peaks object compatible with SpikeInterface waveform extraction
+    """
     peaks = detect_peaks(
         recording,
         method=method,
@@ -76,7 +93,7 @@ def extract_waveform_features(recording,
             w_sel = w[:, top_idx]
             v = w_sel.reshape(-1)
             m = v.mean()
-            sdev = v.std() + 1e-8
+            sdev = v.std() + TINY
             v = (v - m) / sdev
             min_amp = float(np.min(w_sel))
             energy = float(np.sum(w_sel * w_sel))
@@ -89,7 +106,7 @@ def extract_waveform_features(recording,
     peak_locations = np.asarray(peak_locations, dtype=np.int64)
     if scale_features and X.size > 0:
         mx = X.mean(axis=0, keepdims=True)
-        sx = X.std(axis=0, keepdims=True) + 1e-8
+        sx = X.std(axis=0, keepdims=True) + TINY
         X = (X - mx) / sx
     meta = {
         'n_spikes': int(X.shape[0]),
@@ -102,17 +119,36 @@ def extract_waveform_features(recording,
     return X, peak_locations, meta
 
 def preprocess_recording(recording,
-                         method='locally_exclusive',
-                         peak_sign='neg',
-                         detect_threshold=5.0,
-                         exclude_sweep_ms=0.1,
-                         ms_before=0.6,
-                         ms_after=1.4,
-                         channels_per_spike=4,
-                         max_spikes_per_unit=1000,
-                         scale_features=True,
-                         n_jobs=1,
-                         verbose=True):
+                         method: str = 'locally_exclusive',
+                         peak_sign: str = 'neg',
+                         detect_threshold: float = 5.0,
+                         exclude_sweep_ms: float = 0.1,
+                         ms_before: float = 0.6,
+                         ms_after: float = 1.4,
+                         channels_per_spike: int = 4,
+                         max_spikes_per_unit: int = 1000,
+                         scale_features: bool = True,
+                         n_jobs: int = 1,
+                         verbose: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Full preprocessing: detect spikes and extract waveform features.
+
+    Args:
+        recording: SpikeInterface recording extractor
+        method: Peak detection method
+        peak_sign: 'pos' or 'neg'
+        detect_threshold: Detection threshold
+        exclude_sweep_ms: Refractory window in ms to avoid duplicates
+        ms_before: Milliseconds before peak for waveform window
+        ms_after: Milliseconds after peak for waveform window
+        channels_per_spike: Number of channels per spike to include
+        max_spikes_per_unit: Cap spikes per unit for extraction
+        scale_features: Whether to z-score features per dimension
+        n_jobs: Parallel jobs for extraction
+        verbose: Log progress if True
+
+    Returns:
+        Tuple of (X, peak_locations, metadata)
+    """
     peaks = detect_spikes(recording,
                           method=method,
                           peak_sign=peak_sign,
