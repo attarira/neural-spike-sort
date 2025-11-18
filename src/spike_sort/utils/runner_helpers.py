@@ -30,14 +30,31 @@ def print_header(title: str) -> None:
     print("=" * 70)
 
 
-def create_synthetic_recording(num_units: int) -> Tuple[si.BaseRecording, si.BaseRecording, si.BaseSorting]:
-    """Create a synthetic Neuropixels recording and ground truth sorting."""
+def create_synthetic_recording(
+    num_units:            int,
+    probe_name:           str = "Neuropixels1-384",
+    duration:           float = 300.0,
+    sampling_frequency: float = 30000.0,
+    seed:                 int = 4776
+) -> Tuple[si.BaseRecording, si.BaseRecording, si.BaseSorting]:
+    """Generate synthetic recording with drift and ground truth.
+
+    Args:
+        num_units: Number of neurons to simulate
+        probe_name: Name of probe (default: "Neuropixels1-384", 384 channels @ 30kHz)
+        duration: Recording length in seconds (default: 300)
+        sampling_frequency: Sampling rate in Hz (default: 30000)
+        seed: Random seed for reproducibility (default: 4776)
+
+    Returns:
+        Tuple of (static_recording, drift_recording, ground_truth_sorting)
+    """
     static_rec, drift_rec, gt_sorting = si.generate_drifting_recording(
-        probe_name="Neuropixels1-384",
-        num_units=num_units,
-        duration=300,
-        sampling_frequency=30000,
-        seed=4776,
+        probe_name         = probe_name,
+        num_units          = num_units,
+        duration           = duration,
+        sampling_frequency = sampling_frequency,
+        seed               = seed,
     )
     return static_rec, drift_rec, gt_sorting
 
@@ -48,10 +65,12 @@ def load_real_recording(recording_folder: str) -> si.BaseRecording:
     return si.load_extractor(rec_path)
 
 
-def slice_recording(recording: si.BaseRecording,
-                    duration_s: Optional[float],
-                    sf: Optional[float] = None,
-                    gt_sorting: Optional[si.BaseSorting] = None) -> Tuple[si.BaseRecording, Optional[si.BaseSorting]]:
+def slice_recording(
+    recording:          si.BaseRecording,
+    duration_s:          Optional[float],
+    sf:                  Optional[float] = None,
+    gt_sorting: Optional[si.BaseSorting] = None
+) -> Tuple[si.BaseRecording, Optional[si.BaseSorting]]:
     """Slice the recording (and optional ground truth) to a given duration.
 
     Args:
@@ -93,23 +112,25 @@ def prepare_spike_features(recording: si.BaseRecording, threshold: float):
     """
     return preprocess_recording(
         recording,
-        method="locally_exclusive",
-        peak_sign="neg",
-        detect_threshold=threshold,
-        exclude_sweep_ms=0.1,
-        ms_before=0.6,
-        ms_after=1.4,
-        channels_per_spike=4,
-        max_spikes_per_unit=1000,
-        scale_features=True,
-        n_jobs=1,
-        verbose=False,
+        method              = "locally_exclusive",
+        peak_sign           = "neg",
+        detect_threshold    = threshold,
+        exclude_sweep_ms    = 0.1,
+        ms_before           = 0.6,
+        ms_after            = 1.4,
+        channels_per_spike  = 4,
+        max_spikes_per_unit = 1000,
+        scale_features      = True,
+        n_jobs              = 1,
+        verbose             = False,
     )
 
 
-def match_ground_truth(gt_sorting: si.BaseSorting,
-                       peak_locations: np.ndarray,
-                       recording: si.BaseRecording) -> np.ndarray:
+def match_ground_truth(
+    gt_sorting: si.BaseSorting,
+    peak_locations: np.ndarray,
+    recording: si.BaseRecording
+) -> np.ndarray:
     """Assign detected spikes to ground-truth units using a 1 ms tolerance.
 
     Args:
@@ -195,19 +216,21 @@ def analyze_and_print(results: List[Dict[str, Any]]) -> None:
                 print(f"    Clustering: {row['clustering_method']} {clust_params}")
 
 
-def save_metadata(output_dir: Path,
-                  recording: si.BaseRecording,
-                  meta: Dict[str, Any],
-                  mode: str,
-                  duration: Optional[float],
-                  filename: str) -> Path:
+def save_metadata(
+    output_dir: Path,
+    recording: si.BaseRecording,
+    meta: Dict[str, Any],
+    mode: str,
+    duration: Optional[float],
+    filename: str
+) -> Path:
     """Persist run metadata to a JSON file.
 
     Args:
         output_dir: Base output directory
         recording: Recording extractor
         meta: Preprocessing metadata
-        mode: 'synthetic' or 'real'
+        mode: Type of recording (ie., 'real_no_gt' or 'synthetic_with_drift' etc.)
         duration: Subset duration in seconds
         filename: Target JSON filename
 
