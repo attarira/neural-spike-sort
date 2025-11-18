@@ -9,13 +9,15 @@ from typing import Tuple, Dict, Any
 
 TINY = 1e-8
 
-def detect_spikes(recording,
-                  method: str = 'locally_exclusive',
-                  peak_sign: str = 'neg',
-                  detect_threshold: float = 5.0,
-                  exclude_sweep_ms: float = 0.1,
-                  n_jobs: int = 1,
-                  progress_bar: bool = True):
+def detect_spikes(
+    recording,
+    method:             str = 'locally_exclusive',
+    peak_sign:          str = 'neg',
+    detect_threshold: float = 5.0,
+    exclude_sweep_ms: float = 0.1,
+    n_jobs:             int = 1,
+    progress_bar:      bool = True
+) -> np.ndarray:
     """Detect spike peaks on the given recording.
 
     Args:
@@ -32,25 +34,27 @@ def detect_spikes(recording,
     """
     peaks = detect_peaks(
         recording,
-        method=method,
-        peak_sign=peak_sign,
-        detect_threshold=detect_threshold,
-        exclude_sweep_ms=exclude_sweep_ms,
-        n_jobs=n_jobs,
-        progress_bar=False
+        method           = method,
+        peak_sign        = peak_sign,
+        detect_threshold = detect_threshold,
+        exclude_sweep_ms = exclude_sweep_ms,
+        n_jobs           = n_jobs,
+        progress_bar     = progress_bar
     )
     return peaks
 
-def extract_waveform_features(recording,
-                              peaks,
-                              ms_before=0.6,
-                              ms_after=1.4,
-                              channels_per_spike=4,
-                              max_spikes_per_unit=1000,
-                              scale_features=True,
-                              verbose=True,
-                              n_jobs=1,
-                              chunk_duration="1s"):
+def extract_waveform_features(
+    recording,
+    peaks,
+    ms_before           = 0.6,
+    ms_after            = 1.4,
+    channels_per_spike  = 4,
+    max_spikes_per_unit = 1000,
+    scale_features      = True,
+    verbose             = True,
+    n_jobs              = 1,
+    chunk_duration      = "1s"
+):
     fs = recording.get_sampling_frequency()
     nbefore = int(ms_before * fs / 1000)
     nafter = int(ms_after * fs / 1000)
@@ -118,18 +122,20 @@ def extract_waveform_features(recording,
     }
     return X, peak_locations, meta
 
-def preprocess_recording(recording,
-                         method: str = 'locally_exclusive',
-                         peak_sign: str = 'neg',
-                         detect_threshold: float = 5.0,
-                         exclude_sweep_ms: float = 0.1,
-                         ms_before: float = 0.6,
-                         ms_after: float = 1.4,
-                         channels_per_spike: int = 4,
-                         max_spikes_per_unit: int = 1000,
-                         scale_features: bool = True,
-                         n_jobs: int = 1,
-                         verbose: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+def preprocess_recording(
+    recording,
+    method:                str = 'locally_exclusive',
+    peak_sign:             str = 'neg',
+    detect_threshold:    float = 5.0,
+    exclude_sweep_ms:    float = 0.1,
+    ms_before:           float = 0.6,
+    ms_after:            float = 1.4,
+    channels_per_spike:    int = 4,
+    max_spikes_per_unit:   int = 1000,
+    scale_features:       bool = True,
+    n_jobs:                int = 1,
+    verbose:              bool = True
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Full preprocessing: detect spikes and extract waveform features.
 
     Args:
@@ -149,20 +155,24 @@ def preprocess_recording(recording,
     Returns:
         Tuple of (X, peak_locations, metadata)
     """
-    peaks = detect_spikes(recording,
-                          method=method,
-                          peak_sign=peak_sign,
-                          detect_threshold=detect_threshold,
-                          exclude_sweep_ms=exclude_sweep_ms,
-                          n_jobs=n_jobs,
-                          progress_bar=verbose)
-    X, peak_locations, meta = extract_waveform_features(recording,
-                                                        peaks,
-                                                        ms_before=ms_before,
-                                                        ms_after=ms_after,
-                                                        channels_per_spike=channels_per_spike,
-                                                        max_spikes_per_unit=max_spikes_per_unit,
-                                                        scale_features=scale_features,
-                                                        verbose=verbose,
-                                                        n_jobs=n_jobs)
+    peaks = detect_spikes(
+        recording,
+        method           = method,
+        peak_sign        = peak_sign,
+        detect_threshold = detect_threshold,
+        exclude_sweep_ms = exclude_sweep_ms,
+        n_jobs           = n_jobs,
+        progress_bar     = verbose
+    )
+    X, peak_locations, meta = extract_waveform_features(
+        recording,
+        peaks,
+        ms_before           = ms_before,
+        ms_after            = ms_after,
+        channels_per_spike  = channels_per_spike,
+        max_spikes_per_unit = max_spikes_per_unit,
+        scale_features      = scale_features,
+        verbose             = verbose,
+        n_jobs              = n_jobs
+    )
     return X, peak_locations, meta
