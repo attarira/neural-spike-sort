@@ -78,3 +78,7 @@ temp/
 # IBL data
 playground/IBL_data
 /IBL_DATA
+
+# Exception for previous_article files
+!previous_article/
+!previous_article/**
