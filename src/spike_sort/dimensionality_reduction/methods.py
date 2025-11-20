@@ -117,48 +117,54 @@ class ICAReducer(DimensionalityReductionBase):
             return None
 
 
-class CCAReducer(DimensionalityReductionBase):
-    """Canonical Correlation Analysis."""
-    
-    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-        try:
-            if y is None:
-                # Split X into two views for unsupervised CCA
-                mid = X.shape[1] // 2
-                X1, X2 = X[:, :mid], X[:, mid:]
-            else:
-                X1, X2 = X, y.reshape(-1, 1) if y.ndim == 1 else y
-            
-            def _fit():
-                self.model = CCA(**self.params)
-                X_c, _ = self.model.fit_transform(X1, X2)
-                return X_c
-            
-            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
-        except Exception as e:
-            print(f"CCA failed: {str(e)}")
-            return None
+# ============================================================================
+# NOT APPLICABLE: The following methods are not suitable for spike waveform data
+# CCA requires two views/modalities of data
+# LDA is fully supervised and requires ground truth labels
+# ============================================================================
+
+# class CCAReducer(DimensionalityReductionBase):
+#     """Canonical Correlation Analysis - NOT APPLICABLE (requires two data views)."""
+#     
+#     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+#         try:
+#             if y is None:
+#                 # Split X into two views for unsupervised CCA
+#                 mid = X.shape[1] // 2
+#                 X1, X2 = X[:, :mid], X[:, mid:]
+#             else:
+#                 X1, X2 = X, y.reshape(-1, 1) if y.ndim == 1 else y
+#             
+#             def _fit():
+#                 self.model = CCA(**self.params)
+#                 X_c, _ = self.model.fit_transform(X1, X2)
+#                 return X_c
+#             
+#             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+#             return result
+#         except Exception as e:
+#             print(f"CCA failed: {str(e)}")
+#             return None
 
 
-class LDAReducer(DimensionalityReductionBase):
-    """Linear Discriminant Analysis (supervised)."""
-    
-    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-        try:
-            if y is None:
-                print("LDA requires labels (y). Skipping.")
-                return None
-            
-            def _fit():
-                self.model = LinearDiscriminantAnalysis(**self.params)
-                return self.model.fit_transform(X, y)
-            
-            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
-        except Exception as e:
-            print(f"LDA failed: {str(e)}")
-            return None
+# class LDAReducer(DimensionalityReductionBase):
+#     """Linear Discriminant Analysis (supervised) - NOT APPLICABLE (requires ground truth labels)."""
+#     
+#     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+#         try:
+#             if y is None:
+#                 print("LDA requires labels (y). Skipping.")
+#                 return None
+#             
+#             def _fit():
+#                 self.model = LinearDiscriminantAnalysis(**self.params)
+#                 return self.model.fit_transform(X, y)
+#             
+#             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+#             return result
+#         except Exception as e:
+#             print(f"LDA failed: {str(e)}")
+#             return None
 
 
 class TSNEReducer(DimensionalityReductionBase):
@@ -421,8 +427,13 @@ class VAEReducer(DimensionalityReductionBase):
 
 class CEEDReducer(DimensionalityReductionBase):
     """
-    Contrastive Encoder for Event Detection (CEED).
-    Simplified implementation using contrastive learning principles.
+    Contrastive Encoder for Event Detection (CEED) - SUPERVISED METHOD.
+    Uses supervised contrastive learning with proper positive/negative pairs.
+    
+    **Requires ground truth labels (y) to function.**
+    
+    Positive pairs: spikes from the same neuron (same y value)
+    Negative pairs: spikes from different neurons (different y values)
     """
     
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
@@ -452,23 +463,70 @@ class CEEDReducer(DimensionalityReductionBase):
                 def forward(self, x):
                     return self.encoder(x)
             
-            def contrastive_loss(z, temperature):
-                # Simplified contrastive loss
+            def supervised_contrastive_loss(z, labels, temperature):
+                """
+                Supervised contrastive loss.
+                Positive pairs: samples with the same label (same neuron)
+                Negative pairs: samples with different labels (different neurons)
+                """
+                # Normalize embeddings
                 z = nn.functional.normalize(z, dim=1)
+                
+                # Compute similarity matrix: (batch_size, batch_size)
                 similarity_matrix = torch.matmul(z, z.T) / temperature
+                
                 batch_size = z.shape[0]
                 
-                # Create positive pairs (adjacent samples)
-                labels = torch.arange(batch_size).to(z.device)
-                loss = nn.functional.cross_entropy(similarity_matrix, labels)
+                # Create mask for positive pairs (same label, excluding self)
+                labels = labels.contiguous().view(-1, 1)
+                mask_positive = torch.eq(labels, labels.T).float().to(z.device)
+                
+                # Remove diagonal (self-similarity)
+                mask_positive = mask_positive - torch.eye(batch_size).to(z.device)
+                
+                # Compute log probabilities
+                # Subtract max for numerical stability
+                logits_max, _ = torch.max(similarity_matrix, dim=1, keepdim=True)
+                logits = similarity_matrix - logits_max.detach()
+                
+                # Compute log-sum-exp of all negatives (for denominator)
+                exp_logits = torch.exp(logits)
+                
+                # Mask out positive pairs and self from denominator
+                mask_negative = 1 - mask_positive - torch.eye(batch_size).to(z.device)
+                
+                # For each anchor, compute log[ sum(exp(pos)) / sum(exp(neg)) ]
+                # Sum over positive pairs in numerator
+                log_prob_positive = logits - torch.log(exp_logits.sum(dim=1, keepdim=True))
+                
+                # Apply positive mask and average
+                num_positives_per_row = mask_positive.sum(dim=1)
+                
+                # Only compute loss for samples that have at least one positive pair
+                valid_samples = num_positives_per_row > 0
+                
+                if valid_samples.sum() == 0:
+                    # If no valid positive pairs in batch, return zero loss
+                    return torch.tensor(0.0).to(z.device)
+                
+                # Compute mean of log-likelihood over positive pairs
+                loss = -(mask_positive * log_prob_positive).sum(dim=1) / (num_positives_per_row + 1e-8)
+                loss = loss[valid_samples].mean()
+                
                 return loss
             
             def _fit():
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 
-                # Prepare data
+                # Check if labels are provided - CEED requires labels for supervised contrastive learning
+                if y is None:
+                    print("CEED requires labels (y) for supervised contrastive learning. Skipping.")
+                    return None
+                
+                # Prepare data with labels
                 X_tensor = torch.FloatTensor(X).to(device)
-                dataset = TensorDataset(X_tensor)
+                y_tensor = torch.LongTensor(y).to(device)
+                dataset = TensorDataset(X_tensor, y_tensor)
                 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
                 
                 # Create model
@@ -478,15 +536,27 @@ class CEEDReducer(DimensionalityReductionBase):
                 # Train
                 self.model.train()
                 for epoch in range(epochs):
-                    for batch in dataloader:
-                        batch_X = batch[0]
+                    epoch_loss = 0.0
+                    n_batches = 0
+                    for batch_X, batch_y in dataloader:
                         optimizer.zero_grad()
                         z = self.model(batch_X)
-                        loss = contrastive_loss(z, temperature)
-                        loss.backward()
-                        optimizer.step()
+                        loss = supervised_contrastive_loss(z, batch_y, temperature)
+                        
+                        if loss > 0:  # Only backprop if loss is non-zero
+                            loss.backward()
+                            optimizer.step()
+                            epoch_loss += loss.item()
+                        
+                        n_batches += 1
+                    
+                    # Optional: print progress every 10 epochs
+                    if epoch % 10 == 0 and n_batches > 0:
+                        avg_loss = epoch_loss / n_batches
+                        # Uncomment for debugging:
+                        # print(f"CEED Epoch {epoch}/{epochs}, Loss: {avg_loss:.4f}")
                 
-                # Encode
+                # Encode all data
                 self.model.eval()
                 with torch.no_grad():
                     encoded = self.model(X_tensor)
@@ -502,283 +572,301 @@ class CEEDReducer(DimensionalityReductionBase):
             return None
 
 
-class GPFAReducer(DimensionalityReductionBase):
-    """
-    Gaussian Process Factor Analysis (GPFA).
-    Extracts smooth, low-dimensional neural trajectories from population activity.
-    Reference: https://elephant.readthedocs.io/en/latest/tutorials/gpfa.html
-    """
-    
-    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-        try:
-            from elephant.gpfa import GPFA
-            import quantities as pq
-            from neo import SpikeTrain
-            import neo
-            
-            # Default parameters
-            x_dim = self.params.get('x_dim', 10)  # Latent dimensionality
-            bin_size = self.params.get('bin_size', 20)  # ms
-            
-            def _fit():
-                # GPFA expects data as list of trials, each trial is (n_neurons, n_timebins)
-                # For spike sorting, we treat each sample as a "trial"
-                n_samples, n_features = X.shape
-                
-                # Reshape data: treat each sample as a separate trial
-                # GPFA works with spike trains, so we need to convert our features
-                trials = []
-                for i in range(n_samples):
-                    # Treat each feature as a neuron's activity over time
-                    trial_data = X[i:i+1, :].T  # (n_features, 1)
-                    trials.append(trial_data)
-                
-                # Initialize GPFA
-                gpfa = GPFA(x_dim=x_dim, bin_size=bin_size*pq.ms)
-                
-                # Fit and transform
-                # Note: This is a simplified approach - GPFA typically works with temporal data
-                # For spike waveforms, we're treating features as pseudo-temporal bins
-                try:
-                    trajectories = gpfa.fit_transform(trials)
-                    
-                    # Extract latent states
-                    latent_states = []
-                    for traj in trajectories:
-                        # Get the mean latent state for this trial
-                        latent_states.append(traj.mean(axis=1))
-                    
-                    result = np.array(latent_states)
-                    return result
-                    
-                except Exception as e:
-                    # Fallback: Use Factor Analysis if GPFA fails
-                    print(f"GPFA fitting failed, using Factor Analysis fallback: {str(e)}")
-                    from sklearn.decomposition import FactorAnalysis
-                    fa = FactorAnalysis(n_components=x_dim, random_state=42)
-                    return fa.fit_transform(X)
-            
-            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
-            
-        except ImportError:
-            print("Elephant not installed. Install with: pip install elephant quantities neo")
-            print("Using Factor Analysis as fallback...")
-            try:
-                from sklearn.decomposition import FactorAnalysis
-                x_dim = self.params.get('x_dim', 10)
-                
-                def _fit():
-                    fa = FactorAnalysis(n_components=x_dim, random_state=42)
-                    return fa.fit_transform(X)
-                
-                result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-                return result
-            except Exception as e:
-                print(f"Fallback also failed: {str(e)}")
-                return None
-                
-        except Exception as e:
-            print(f"GPFA failed: {str(e)}")
-            return None
+# ============================================================================
+# NOT APPLICABLE: GPFA is designed for temporal neural population dynamics,
+# not individual spike waveforms
+# ============================================================================
+
+# class GPFAReducer(DimensionalityReductionBase):
+#     """
+#     Gaussian Process Factor Analysis (GPFA) - NOT APPLICABLE.
+#     Extracts smooth, low-dimensional neural trajectories from population activity.
+#     This method is designed for time-series data, not spike waveforms.
+#     Reference: https://elephant.readthedocs.io/en/latest/tutorials/gpfa.html
+#     """
+#     
+#     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+#         try:
+#             from elephant.gpfa import GPFA
+#             import quantities as pq
+#             from neo import SpikeTrain
+#             import neo
+#             
+#             # Default parameters
+#             x_dim = self.params.get('x_dim', 10)  # Latent dimensionality
+#             bin_size = self.params.get('bin_size', 20)  # ms
+#             
+#             def _fit():
+#                 # GPFA expects data as list of trials, each trial is (n_neurons, n_timebins)
+#                 # For spike sorting, we treat each sample as a "trial"
+#                 n_samples, n_features = X.shape
+#                 
+#                 # Reshape data: treat each sample as a separate trial
+#                 # GPFA works with spike trains, so we need to convert our features
+#                 trials = []
+#                 for i in range(n_samples):
+#                     # Treat each feature as a neuron's activity over time
+#                     trial_data = X[i:i+1, :].T  # (n_features, 1)
+#                     trials.append(trial_data)
+#                 
+#                 # Initialize GPFA
+#                 gpfa = GPFA(x_dim=x_dim, bin_size=bin_size*pq.ms)
+#                 
+#                 # Fit and transform
+#                 # Note: This is a simplified approach - GPFA typically works with temporal data
+#                 # For spike waveforms, we're treating features as pseudo-temporal bins
+#                 try:
+#                     trajectories = gpfa.fit_transform(trials)
+#                     
+#                     # Extract latent states
+#                     latent_states = []
+#                     for traj in trajectories:
+#                         # Get the mean latent state for this trial
+#                         latent_states.append(traj.mean(axis=1))
+#                     
+#                     result = np.array(latent_states)
+#                     return result
+#                     
+#                 except Exception as e:
+#                     # Fallback: Use Factor Analysis if GPFA fails
+#                     print(f"GPFA fitting failed, using Factor Analysis fallback: {str(e)}")
+#                     from sklearn.decomposition import FactorAnalysis
+#                     fa = FactorAnalysis(n_components=x_dim, random_state=42)
+#                     return fa.fit_transform(X)
+#             
+#             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+#             return result
+#             
+#         except ImportError:
+#             print("Elephant not installed. Install with: pip install elephant quantities neo")
+#             print("Using Factor Analysis as fallback...")
+#             try:
+#                 from sklearn.decomposition import FactorAnalysis
+#                 x_dim = self.params.get('x_dim', 10)
+#                 
+#                 def _fit():
+#                     fa = FactorAnalysis(n_components=x_dim, random_state=42)
+#                     return fa.fit_transform(X)
+#                 
+#                 result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+#                 return result
+#             except Exception as e:
+#                 print(f"Fallback also failed: {str(e)}")
+#                 return None
+#                 
+#         except Exception as e:
+#             print(f"GPFA failed: {str(e)}")
+#             return None
 
 
-class SliceTCAReducer(DimensionalityReductionBase):
-    """
-    Slice Tensor Component Analysis (Slice TCA).
-    Identifies low-dimensional structure in neural population activity.
-    Reference: https://www.nature.com/articles/s41593-024-01626-2
-    
-    Simplified implementation using Tucker decomposition.
-    """
-    
-    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-        try:
-            # Default parameters
-            n_components = self.params.get('n_components', 10)
-            n_slices = self.params.get('n_slices', 5)
-            
-            def _fit():
-                try:
-                    # Try using tensorly for proper tensor decomposition
-                    import tensorly as tl
-                    from tensorly.decomposition import tucker
-                    
-                    n_samples, n_features = X.shape
-                    
-                    # Reshape data into tensor: (samples, features/slices, slices)
-                    # This is a simplified approach - actual Slice TCA is more complex
-                    slice_size = n_features // n_slices
-                    if slice_size * n_slices < n_features:
-                        # Pad to make it divisible
-                        pad_size = slice_size * n_slices - n_features
-                        X_padded = np.pad(X, ((0, 0), (0, abs(pad_size))), mode='constant')
-                    else:
-                        X_padded = X[:, :slice_size * n_slices]
-                    
-                    # Reshape into 3D tensor
-                    X_tensor = X_padded.reshape(n_samples, slice_size, n_slices)
-                    
-                    # Apply Tucker decomposition
-                    core, factors = tucker(X_tensor, rank=[n_components, slice_size, n_slices])
-                    
-                    # Use the first factor (across samples) as the reduced representation
-                    result = factors[0]
-                    
-                    return result
-                    
-                except ImportError:
-                    # Fallback: Use NMF (Non-negative Matrix Factorization)
-                    print("Tensorly not installed. Using NMF as fallback for Slice TCA.")
-                    from sklearn.decomposition import NMF
-                    
-                    # Ensure non-negative data for NMF
-                    X_nonneg = X - X.min() + 1e-10
-                    
-                    nmf = NMF(n_components=n_components, random_state=42, max_iter=500)
-                    result = nmf.fit_transform(X_nonneg)
-                    
-                    return result
-            
-            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
-            
-        except Exception as e:
-            print(f"Slice TCA failed: {str(e)}")
-            return None
+# ============================================================================
+# NOT APPLICABLE: Slice TCA is designed for tensor-structured neural population
+# data across conditions/trials, not individual spike waveforms
+# ============================================================================
+
+# class SliceTCAReducer(DimensionalityReductionBase):
+#     """
+#     Slice Tensor Component Analysis (Slice TCA) - NOT APPLICABLE.
+#     Identifies low-dimensional structure in neural population activity.
+#     This method is designed for tensor-structured data, not spike waveforms.
+#     Reference: https://www.nature.com/articles/s41593-024-01626-2
+#     
+#     Simplified implementation using Tucker decomposition.
+#     """
+#     
+#     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+#         try:
+#             # Default parameters
+#             n_components = self.params.get('n_components', 10)
+#             n_slices = self.params.get('n_slices', 5)
+#             
+#             def _fit():
+#                 try:
+#                     # Try using tensorly for proper tensor decomposition
+#                     import tensorly as tl
+#                     from tensorly.decomposition import tucker
+#                     
+#                     n_samples, n_features = X.shape
+#                     
+#                     # Reshape data into tensor: (samples, features/slices, slices)
+#                     # This is a simplified approach - actual Slice TCA is more complex
+#                     slice_size = n_features // n_slices
+#                     if slice_size * n_slices < n_features:
+#                         # Pad to make it divisible
+#                         pad_size = slice_size * n_slices - n_features
+#                         X_padded = np.pad(X, ((0, 0), (0, abs(pad_size))), mode='constant')
+#                     else:
+#                         X_padded = X[:, :slice_size * n_slices]
+#                     
+#                     # Reshape into 3D tensor
+#                     X_tensor = X_padded.reshape(n_samples, slice_size, n_slices)
+#                     
+#                     # Apply Tucker decomposition
+#                     core, factors = tucker(X_tensor, rank=[n_components, slice_size, n_slices])
+#                     
+#                     # Use the first factor (across samples) as the reduced representation
+#                     result = factors[0]
+#                     
+#                     return result
+#                     
+#                 except ImportError:
+#                     # Fallback: Use NMF (Non-negative Matrix Factorization)
+#                     print("Tensorly not installed. Using NMF as fallback for Slice TCA.")
+#                     from sklearn.decomposition import NMF
+#                     
+#                     # Ensure non-negative data for NMF
+#                     X_nonneg = X - X.min() + 1e-10
+#                     
+#                     nmf = NMF(n_components=n_components, random_state=42, max_iter=500)
+#                     result = nmf.fit_transform(X_nonneg)
+#                     
+#                     return result
+#             
+#             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+#             return result
+#             
+#         except Exception as e:
+#             print(f"Slice TCA failed: {str(e)}")
+#             return None
 
 
-class LFADSReducer(DimensionalityReductionBase):
-    """
-    Latent Factor Analysis via Dynamical Systems (LFADS).
-    Uses recurrent neural networks to infer latent dynamics from neural data.
-    Reference: https://www.nature.com/articles/s41592-018-0109-9
-    
-    Simplified implementation using LSTM autoencoder.
-    """
-    
-    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-        try:
-            import torch
-            import torch.nn as nn
-            import torch.optim as optim
-            from torch.utils.data import TensorDataset, DataLoader
-            
-            # Default parameters
-            latent_dim = self.params.get('latent_dim', 10)
-            hidden_dim = self.params.get('hidden_dim', 64)
-            num_layers = self.params.get('num_layers', 2)
-            epochs = self.params.get('epochs', 50)
-            batch_size = self.params.get('batch_size', 32)
-            learning_rate = self.params.get('learning_rate', 0.001)
-            sequence_length = self.params.get('sequence_length', 10)
-            
-            class LFADSEncoder(nn.Module):
-                def __init__(self, input_dim, hidden_dim, latent_dim, num_layers):
-                    super().__init__()
-                    self.hidden_dim = hidden_dim
-                    self.num_layers = num_layers
-                    
-                    # LSTM encoder
-                    self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, 
-                                       batch_first=True, dropout=0.2 if num_layers > 1 else 0)
-                    
-                    # Map to latent space
-                    self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-                    self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-                    
-                    # LSTM decoder
-                    self.decoder_lstm = nn.LSTM(latent_dim, hidden_dim, num_layers,
-                                                batch_first=True, dropout=0.2 if num_layers > 1 else 0)
-                    self.decoder_fc = nn.Linear(hidden_dim, input_dim)
-                
-                def encode(self, x):
-                    # x: (batch, seq_len, input_dim)
-                    _, (h_n, _) = self.lstm(x)
-                    # Use last hidden state
-                    h = h_n[-1]  # (batch, hidden_dim)
-                    mu = self.fc_mu(h)
-                    logvar = self.fc_logvar(h)
-                    return mu, logvar
-                
-                def reparameterize(self, mu, logvar):
-                    std = torch.exp(0.5 * logvar)
-                    eps = torch.randn_like(std)
-                    return mu + eps * std
-                
-                def decode(self, z, seq_len):
-                    # z: (batch, latent_dim)
-                    # Repeat z for each time step
-                    z_seq = z.unsqueeze(1).repeat(1, seq_len, 1)  # (batch, seq_len, latent_dim)
-                    h, _ = self.decoder_lstm(z_seq)
-                    output = self.decoder_fc(h)
-                    return output
-                
-                def forward(self, x):
-                    mu, logvar = self.encode(x)
-                    z = self.reparameterize(mu, logvar)
-                    recon = self.decode(z, x.size(1))
-                    return recon, mu, logvar
-            
-            def lfads_loss(recon_x, x, mu, logvar):
-                # Reconstruction loss
-                recon_loss = nn.functional.mse_loss(recon_x, x, reduction='sum')
-                # KL divergence
-                kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                return recon_loss + kld
-            
-            def _fit():
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                
-                n_samples, n_features = X.shape
-                
-                # Reshape data into sequences
-                # Pad if necessary
-                if n_features % sequence_length != 0:
-                    pad_size = sequence_length - (n_features % sequence_length)
-                    X_padded = np.pad(X, ((0, 0), (0, pad_size)), mode='edge')
-                else:
-                    X_padded = X
-                
-                # Reshape: (n_samples, sequence_length, features_per_step)
-                features_per_step = X_padded.shape[1] // sequence_length
-                X_seq = X_padded.reshape(n_samples, sequence_length, features_per_step)
-                
-                # Prepare data
-                X_tensor = torch.FloatTensor(X_seq).to(device)
-                dataset = TensorDataset(X_tensor)
-                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-                
-                # Create model
-                self.model = LFADSEncoder(features_per_step, hidden_dim, latent_dim, num_layers).to(device)
-                optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-                
-                # Train
-                self.model.train()
-                for epoch in range(epochs):
-                    for batch in dataloader:
-                        batch_X = batch[0]
-                        optimizer.zero_grad()
-                        recon, mu, logvar = self.model(batch_X)
-                        loss = lfads_loss(recon, batch_X, mu, logvar)
-                        loss.backward()
-                        optimizer.step()
-                
-                # Extract latent representations
-                self.model.eval()
-                with torch.no_grad():
-                    mu, _ = self.model.encode(X_tensor)
-                    return mu.cpu().numpy()
-            
-            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
-            
-        except ImportError:
-            print("PyTorch not installed. Install with: pip install torch")
-            return None
-        except Exception as e:
-            print(f"LFADS failed: {str(e)}")
-            return None
+# ============================================================================
+# NOT APPLICABLE: LFADS is designed for temporal neural population dynamics,
+# not individual spike waveforms
+# ============================================================================
+
+# class LFADSReducer(DimensionalityReductionBase):
+#     """
+#     Latent Factor Analysis via Dynamical Systems (LFADS) - NOT APPLICABLE.
+#     Uses recurrent neural networks to infer latent dynamics from neural data.
+#     This method is designed for sequential/temporal data, not spike waveforms.
+#     Reference: https://www.nature.com/articles/s41592-018-0109-9
+#     
+#     Simplified implementation using LSTM autoencoder.
+#     """
+#     
+#     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+#         try:
+#             import torch
+#             import torch.nn as nn
+#             import torch.optim as optim
+#             from torch.utils.data import TensorDataset, DataLoader
+#             
+#             # Default parameters
+#             latent_dim = self.params.get('latent_dim', 10)
+#             hidden_dim = self.params.get('hidden_dim', 64)
+#             num_layers = self.params.get('num_layers', 2)
+#             epochs = self.params.get('epochs', 50)
+#             batch_size = self.params.get('batch_size', 32)
+#             learning_rate = self.params.get('learning_rate', 0.001)
+#             sequence_length = self.params.get('sequence_length', 10)
+#             
+#             class LFADSEncoder(nn.Module):
+#                 def __init__(self, input_dim, hidden_dim, latent_dim, num_layers):
+#                     super().__init__()
+#                     self.hidden_dim = hidden_dim
+#                     self.num_layers = num_layers
+#                     
+#                     # LSTM encoder
+#                     self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, 
+#                                        batch_first=True, dropout=0.2 if num_layers > 1 else 0)
+#                     
+#                     # Map to latent space
+#                     self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+#                     self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+#                     
+#                     # LSTM decoder
+#                     self.decoder_lstm = nn.LSTM(latent_dim, hidden_dim, num_layers,
+#                                                 batch_first=True, dropout=0.2 if num_layers > 1 else 0)
+#                     self.decoder_fc = nn.Linear(hidden_dim, input_dim)
+#                 
+#                 def encode(self, x):
+#                     # x: (batch, seq_len, input_dim)
+#                     _, (h_n, _) = self.lstm(x)
+#                     # Use last hidden state
+#                     h = h_n[-1]  # (batch, hidden_dim)
+#                     mu = self.fc_mu(h)
+#                     logvar = self.fc_logvar(h)
+#                     return mu, logvar
+#                 
+#                 def reparameterize(self, mu, logvar):
+#                     std = torch.exp(0.5 * logvar)
+#                     eps = torch.randn_like(std)
+#                     return mu + eps * std
+#                 
+#                 def decode(self, z, seq_len):
+#                     # z: (batch, latent_dim)
+#                     # Repeat z for each time step
+#                     z_seq = z.unsqueeze(1).repeat(1, seq_len, 1)  # (batch, seq_len, latent_dim)
+#                     h, _ = self.decoder_lstm(z_seq)
+#                     output = self.decoder_fc(h)
+#                     return output
+#                 
+#                 def forward(self, x):
+#                     mu, logvar = self.encode(x)
+#                     z = self.reparameterize(mu, logvar)
+#                     recon = self.decode(z, x.size(1))
+#                     return recon, mu, logvar
+#             
+#             def lfads_loss(recon_x, x, mu, logvar):
+#                 # Reconstruction loss
+#                 recon_loss = nn.functional.mse_loss(recon_x, x, reduction='sum')
+#                 # KL divergence
+#                 kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+#                 return recon_loss + kld
+#             
+#             def _fit():
+#                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#                 
+#                 n_samples, n_features = X.shape
+#                 
+#                 # Reshape data into sequences
+#                 # Pad if necessary
+#                 if n_features % sequence_length != 0:
+#                     pad_size = sequence_length - (n_features % sequence_length)
+#                     X_padded = np.pad(X, ((0, 0), (0, pad_size)), mode='edge')
+#                 else:
+#                     X_padded = X
+#                 
+#                 # Reshape: (n_samples, sequence_length, features_per_step)
+#                 features_per_step = X_padded.shape[1] // sequence_length
+#                 X_seq = X_padded.reshape(n_samples, sequence_length, features_per_step)
+#                 
+#                 # Prepare data
+#                 X_tensor = torch.FloatTensor(X_seq).to(device)
+#                 dataset = TensorDataset(X_tensor)
+#                 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+#                 
+#                 # Create model
+#                 self.model = LFADSEncoder(features_per_step, hidden_dim, latent_dim, num_layers).to(device)
+#                 optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+#                 
+#                 # Train
+#                 self.model.train()
+#                 for epoch in range(epochs):
+#                     for batch in dataloader:
+#                         batch_X = batch[0]
+#                         optimizer.zero_grad()
+#                         recon, mu, logvar = self.model(batch_X)
+#                         loss = lfads_loss(recon, batch_X, mu, logvar)
+#                         loss.backward()
+#                         optimizer.step()
+#                 
+#                 # Extract latent representations
+#                 self.model.eval()
+#                 with torch.no_grad():
+#                     mu, _ = self.model.encode(X_tensor)
+#                     return mu.cpu().numpy()
+#             
+#             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+#             return result
+#             
+#         except ImportError:
+#             print("PyTorch not installed. Install with: pip install torch")
+#             return None
+#         except Exception as e:
+#             print(f"LFADS failed: {str(e)}")
+#             return None
 
 
 # Factory function to create reducers
@@ -796,8 +884,8 @@ def create_reducer(method_name: str, **params) -> Optional[DimensionalityReducti
     reducers = {
         'PCA': PCAReducer,
         'ICA': ICAReducer,
-        'CCA': CCAReducer,
-        'LDA': LDAReducer,
+        # 'CCA': CCAReducer,  # NOT APPLICABLE: requires two data views
+        # 'LDA': LDAReducer,  # NOT APPLICABLE: requires ground truth labels
         'TSNE': TSNEReducer,
         't-SNE': TSNEReducer,
         'UMAP': UMAPReducer,
@@ -807,9 +895,9 @@ def create_reducer(method_name: str, **params) -> Optional[DimensionalityReducti
         'Autoencoder': AutoencoderReducer,
         'VAE': VAEReducer,
         'CEED': CEEDReducer,
-        'GPFA': GPFAReducer,
-        'SliceTCA': SliceTCAReducer,
-        'LFADS': LFADSReducer,
+        # 'GPFA': GPFAReducer,  # NOT APPLICABLE: designed for temporal population dynamics
+        # 'SliceTCA': SliceTCAReducer,  # NOT APPLICABLE: designed for tensor-structured data
+        # 'LFADS': LFADSReducer,  # NOT APPLICABLE: designed for temporal sequential data
     }
     
     reducer_class = reducers.get(method_name)

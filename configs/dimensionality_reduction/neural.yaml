@@ -1,19 +1,29 @@
+# ============================================================================
+# NOT APPLICABLE: These methods are designed for temporal/sequential neural
+# population dynamics, not individual spike waveforms
+# ============================================================================
+
 dimensionality_reduction:
-  GPFA:
-    - x_dim: 10
-      bin_size: 20
-    - x_dim: 15
-      bin_size: 20
-  SliceTCA:
-    - n_components: 10
-      n_slices: 5
-    - n_components: 15
-      n_slices: 5
-  LFADS:
-    - latent_dim: 10
-      hidden_dim: 64
-      num_layers: 2
-      epochs: 50
-      batch_size: 32
-      learning_rate: 0.001
-      sequence_length: 10
+  # NOT APPLICABLE: GPFA is designed for temporal neural population dynamics
+  # GPFA:
+  #   - x_dim: 10
+  #     bin_size: 20
+  #   - x_dim: 15
+  #     bin_size: 20
+  
+  # NOT APPLICABLE: SliceTCA is designed for tensor-structured data
+  # SliceTCA:
+  #   - n_components: 10
+  #     n_slices: 5
+  #   - n_components: 15
+  #     n_slices: 5
+  
+  # NOT APPLICABLE: LFADS is designed for temporal sequential data
+  # LFADS:
+  #   - latent_dim: 10
+  #     hidden_dim: 64
+  #     num_layers: 2
+  #     epochs: 50
+  #     batch_size: 32
+  #     learning_rate: 0.001
+  #     sequence_length: 10

@@ -21,6 +21,7 @@ dimensionality_reduction:
       epochs: 50
       batch_size: 32
       learning_rate: 0.001
+  # CEED is a supervised method - requires ground truth labels (y)
   CEED:
     - encoding_dim: 10
       hidden_dim: 64
@@ -34,18 +35,20 @@ dimensionality_reduction:
       batch_size: 32
       learning_rate: 0.001
       temperature: 0.5
-  LFADS:
-    - latent_dim: 10
-      hidden_dim: 64
-      num_layers: 2
-      epochs: 50
-      batch_size: 32
-      learning_rate: 0.001
-      sequence_length: 10
-    - latent_dim: 20
-      hidden_dim: 64
-      num_layers: 2
-      epochs: 50
-      batch_size: 32
-      learning_rate: 0.001
-      sequence_length: 10
+  
+  # NOT APPLICABLE: LFADS is designed for temporal sequential data
+  # LFADS:
+  #   - latent_dim: 10
+  #     hidden_dim: 64
+  #     num_layers: 2
+  #     epochs: 50
+  #     batch_size: 32
+  #     learning_rate: 0.001
+  #     sequence_length: 10
+  #   - latent_dim: 20
+  #     hidden_dim: 64
+  #     num_layers: 2
+  #     epochs: 50
+  #     batch_size: 32
+  #     learning_rate: 0.001
+  #     sequence_length: 10

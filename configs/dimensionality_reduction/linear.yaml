@@ -9,10 +9,14 @@ dimensionality_reduction:
     - n_components: 10
     - n_components: 20
     - n_components: 30
-  CCA:
-    - n_components: 1
-  LDA:
-    - n_components: 2
-    - n_components: 3
-    - n_components: 5
-    - n_components: 10
+  
+  # NOT APPLICABLE: CCA requires two data views/modalities
+  # CCA:
+  #   - n_components: 1
+  
+  # NOT APPLICABLE: LDA requires ground truth labels (supervised)
+  # LDA:
+  #   - n_components: 2
+  #   - n_components: 3
+  #   - n_components: 5
+  #   - n_components: 10

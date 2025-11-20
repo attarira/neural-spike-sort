@@ -9,7 +9,7 @@ Members: Muhammad, Ryan, Rayaan
 
 - **Unified Interface**: Clean, extensible base classes for all methods
 - **Comprehensive Methods**: 
-  - **15 Dimensionality Reduction Methods**: Linear (PCA, ICA, CCA, LDA), Manifold (t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE), Deep Learning (Autoencoder, VAE, CEED), Neural Dynamics (GPFA, Slice TCA, LFADS)
+  - **10 Dimensionality Reduction Methods**: Linear (PCA, ICA), Manifold (t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE), Deep Learning (Autoencoder, VAE, CEED)
   - **9 Clustering Methods**: K-Means, GMM, DBSCAN, Spectral, Dirichlet Process, HMM, Agglomerative, OPTICS, Mean Shift
 - **Robust Evaluation**: Multiple metrics with and without ground truth
 - **Parallel Execution**: Support for multiprocessing to speed up experiments
@@ -130,30 +130,30 @@ clustering:
 
 ## 🔬 Implemented Methods
 
-### Dimensionality Reduction (15 Methods)
+### Dimensionality Reduction (10 Methods)
 
 #### Linear Methods
 1. **PCA** (Principal Component Analysis) - Identifies orthogonal directions of maximum variance in spike waveforms, useful for capturing the main shape variations
 2. **ICA** (Independent Component Analysis) - Separates spike waveforms into statistically independent components, effective for unmixing overlapping neural signals
-3. **CCA** (Canonical Correlation Analysis) - Finds linear relationships between spike features and other variables (e.g., behavioral data)
-4. **LDA** (Linear Discriminant Analysis) - Supervised method that maximizes separation between known neuron classes in spike feature space
 
 #### Nonlinear Manifold Methods
-5. **t-SNE** (t-Distributed Stochastic Neighbor Embedding) - Preserves local neighborhood structure of spike waveforms, excellent for visualization of cluster separation
-6. **UMAP** (Uniform Manifold Approximation and Projection) - Preserves both local and global structure of spike data, faster than t-SNE with better scalability
-7. **Isomap** (Isometric Mapping) - Preserves geodesic distances in spike feature space, captures nonlinear manifold structure
-8. **Laplacian Eigenmaps** - Graph-based method that preserves local relationships between similar spike waveforms
-9. **LLE** (Locally Linear Embedding) - Assumes spike waveforms lie on a locally linear manifold, preserves local geometric properties
+3. **t-SNE** (t-Distributed Stochastic Neighbor Embedding) - Preserves local neighborhood structure of spike waveforms, excellent for visualization of cluster separation
+4. **UMAP** (Uniform Manifold Approximation and Projection) - Preserves both local and global structure of spike data, faster than t-SNE with better scalability
+5. **Isomap** (Isometric Mapping) - Preserves geodesic distances in spike feature space, captures nonlinear manifold structure
+6. **Laplacian Eigenmaps** - Graph-based method that preserves local relationships between similar spike waveforms
+7. **LLE** (Locally Linear Embedding) - Assumes spike waveforms lie on a locally linear manifold, preserves local geometric properties
 
 #### Deep Learning Methods
-10. **Autoencoder** - Neural network that learns compressed representations of spike waveforms through reconstruction
-11. **VAE** (Variational Autoencoder) - Probabilistic autoencoder that learns a smooth latent space of spike features with uncertainty quantification
-12. **CEED** (Contrastive Encoder for Event Detection) - Uses contrastive learning to learn discriminative spike representations
+8. **Autoencoder** - Neural network that learns compressed representations of spike waveforms through reconstruction
+9. **VAE** (Variational Autoencoder) - Probabilistic autoencoder that learns a smooth latent space of spike features with uncertainty quantification
+10. **CEED** (Contrastive Encoder for Event Detection) - **Supervised method** that uses contrastive learning to learn discriminative spike representations (requires ground truth labels)
 
-#### Neural Dynamics Methods
-13. **GPFA** (Gaussian Process Factor Analysis) - Extracts smooth, low-dimensional neural trajectories from population spiking activity over time
-14. **Slice TCA** (Slice Tensor Component Analysis) - Tensor decomposition method for identifying shared low-dimensional structure across neural populations
-15. **LFADS** (Latent Factor Analysis via Dynamical Systems) - RNN-based method that infers latent dynamics and denoises neural population activity
+#### Methods Not Applicable to Spike Waveforms (Commented Out)
+- **CCA** (Canonical Correlation Analysis) - Requires two data views/modalities
+- **LDA** (Linear Discriminant Analysis) - Requires ground truth labels (supervised)
+- **GPFA** (Gaussian Process Factor Analysis) - Designed for temporal neural population dynamics
+- **Slice TCA** (Slice Tensor Component Analysis) - Designed for tensor-structured data across conditions
+- **LFADS** (Latent Factor Analysis via Dynamical Systems) - Designed for temporal sequential data
 
 ### Clustering Methods (9 Methods)
 

@@ -15,7 +15,7 @@ dimensionality_reduction:
     - n_components: 20
     - n_components: 30
   
-  # LDA requires ground truth labels
+  # NOT APPLICABLE: LDA requires ground truth labels (supervised)
   # LDA:
   #   - n_components: 5
   #   - n_components: 10
@@ -52,27 +52,22 @@ dimensionality_reduction:
     - n_neighbors: 20
       n_components: 10
   
-  # Advanced Neural Methods (require additional dependencies)
-  # Uncomment to use - requires: pip install elephant quantities neo
+  # NOT APPLICABLE: The following methods are not suitable for spike waveform data
+  # GPFA - designed for temporal neural population dynamics
+  # SliceTCA - designed for tensor-structured data across conditions
+  # LFADS - designed for temporal sequential data
+  # CCA - requires two data views/modalities
+  
   # GPFA:
   #   - x_dim: 10
   #     bin_size: 20
-  #   - x_dim: 15
-  #     bin_size: 20
   
-  # Uncomment to use - requires: pip install tensorly
   # SliceTCA:
   #   - n_components: 10
   #     n_slices: 5
-  #   - n_components: 15
-  #     n_slices: 5
   
-  # Uncomment to use - requires: pip install torch
   # LFADS:
   #   - latent_dim: 10
-  #     hidden_dim: 64
-  #     epochs: 30
-  #   - latent_dim: 20
   #     hidden_dim: 64
   #     epochs: 30
 
