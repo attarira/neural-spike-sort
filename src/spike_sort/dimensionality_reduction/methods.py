@@ -446,7 +446,7 @@ class TriMapReducer(DimensionalityReductionBase):
 
 
 class AutoencoderReducer(DimensionalityReductionBase):
-    """Autoencoder-based dimensionality reduction."""
+    """Autoencoder-based dimensionality reduction with train/test split to avoid data leakage."""
     
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         try:
@@ -454,6 +454,7 @@ class AutoencoderReducer(DimensionalityReductionBase):
             import torch.nn as nn
             import torch.optim as optim
             from torch.utils.data import TensorDataset, DataLoader
+            from sklearn.model_selection import train_test_split
             
             # Default parameters
             encoding_dim = self.params.get('encoding_dim', 10)
@@ -461,6 +462,8 @@ class AutoencoderReducer(DimensionalityReductionBase):
             epochs = self.params.get('epochs', 50)
             batch_size = self.params.get('batch_size', 32)
             learning_rate = self.params.get('learning_rate', 0.001)
+            test_size = self.params.get('test_size', 0.2)  # 80/20 train/test split
+            random_state = self.params.get('random_state', 42)
             
             class Autoencoder(nn.Module):
                 def __init__(self, input_dim, hidden_dim, encoding_dim):
@@ -487,20 +490,29 @@ class AutoencoderReducer(DimensionalityReductionBase):
             def _fit():
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 
-                # Prepare data
-                X_tensor = torch.FloatTensor(X).to(device)
-                dataset = TensorDataset(X_tensor)
-                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+                # Train/test split to avoid data leakage
+                train_idx, test_idx = train_test_split(
+                    np.arange(len(X)),
+                    test_size=test_size,
+                    random_state=random_state
+                )
+                X_train = X[train_idx]
+                X_test = X[test_idx]
+                
+                # Prepare training data
+                X_train_tensor = torch.FloatTensor(X_train).to(device)
+                train_dataset = TensorDataset(X_train_tensor)
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
                 
                 # Create model
                 self.model = Autoencoder(X.shape[1], hidden_dim, encoding_dim).to(device)
                 criterion = nn.MSELoss()
                 optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
                 
-                # Train
+                # Train on training set only
                 self.model.train()
                 for epoch in range(epochs):
-                    for batch in dataloader:
+                    for batch in train_loader:
                         batch_X = batch[0]
                         optimizer.zero_grad()
                         output = self.model(batch_X)
@@ -508,14 +520,22 @@ class AutoencoderReducer(DimensionalityReductionBase):
                         loss.backward()
                         optimizer.step()
                 
-                # Encode
+                # Encode TEST set only (never seen during training)
                 self.model.eval()
+                X_test_tensor = torch.FloatTensor(X_test).to(device)
                 with torch.no_grad():
-                    encoded = self.model.encode(X_tensor)
-                    return encoded.cpu().numpy()
+                    encoded = self.model.encode(X_test_tensor)
+                    return encoded.cpu().numpy(), test_idx
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return self._validate_output(result)
+            if result is None:
+                return None
+            
+            # Store test indices in metadata for downstream alignment
+            encoded_data, test_indices = result
+            self.test_indices = test_indices
+            return self._validate_output(encoded_data)
+            
         except ImportError:
             print("PyTorch not installed. Install with: pip install torch")
             return None
@@ -525,7 +545,7 @@ class AutoencoderReducer(DimensionalityReductionBase):
 
 
 class VAEReducer(DimensionalityReductionBase):
-    """Variational Autoencoder-based dimensionality reduction."""
+    """Variational Autoencoder-based dimensionality reduction with train/test split."""
     
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         try:
@@ -533,6 +553,7 @@ class VAEReducer(DimensionalityReductionBase):
             import torch.nn as nn
             import torch.optim as optim
             from torch.utils.data import TensorDataset, DataLoader
+            from sklearn.model_selection import train_test_split
             
             # Default parameters
             encoding_dim = self.params.get('encoding_dim', 10)
@@ -540,6 +561,8 @@ class VAEReducer(DimensionalityReductionBase):
             epochs = self.params.get('epochs', 50)
             batch_size = self.params.get('batch_size', 32)
             learning_rate = self.params.get('learning_rate', 0.001)
+            test_size = self.params.get('test_size', 0.2)  # 80/20 train/test split
+            random_state = self.params.get('random_state', 42)
             
             class VAE(nn.Module):
                 def __init__(self, input_dim, hidden_dim, encoding_dim):
@@ -582,19 +605,28 @@ class VAEReducer(DimensionalityReductionBase):
             def _fit():
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 
-                # Prepare data
-                X_tensor = torch.FloatTensor(X).to(device)
-                dataset = TensorDataset(X_tensor)
-                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+                # Train/test split to avoid data leakage
+                train_idx, test_idx = train_test_split(
+                    np.arange(len(X)),
+                    test_size=test_size,
+                    random_state=random_state
+                )
+                X_train = X[train_idx]
+                X_test = X[test_idx]
+                
+                # Prepare training data
+                X_train_tensor = torch.FloatTensor(X_train).to(device)
+                train_dataset = TensorDataset(X_train_tensor)
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
                 
                 # Create model
                 self.model = VAE(X.shape[1], hidden_dim, encoding_dim).to(device)
                 optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
                 
-                # Train
+                # Train on training set only
                 self.model.train()
                 for epoch in range(epochs):
-                    for batch in dataloader:
+                    for batch in train_loader:
                         batch_X = batch[0]
                         optimizer.zero_grad()
                         recon_batch, mu, logvar = self.model(batch_X)
@@ -602,14 +634,22 @@ class VAEReducer(DimensionalityReductionBase):
                         loss.backward()
                         optimizer.step()
                 
-                # Encode
+                # Encode TEST set only (never seen during training)
                 self.model.eval()
+                X_test_tensor = torch.FloatTensor(X_test).to(device)
                 with torch.no_grad():
-                    mu, _ = self.model.encode(X_tensor)
-                    return mu.cpu().numpy()
+                    mu, _ = self.model.encode(X_test_tensor)
+                    return mu.cpu().numpy(), test_idx
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return self._validate_output(result)
+            if result is None:
+                return None
+            
+            # Store test indices in metadata for downstream alignment
+            encoded_data, test_indices = result
+            self.test_indices = test_indices
+            return self._validate_output(encoded_data)
+            
         except ImportError:
             print("PyTorch not installed. Install with: pip install torch")
             return None
@@ -716,22 +756,37 @@ class CEEDReducer(DimensionalityReductionBase):
                     print("CEED requires labels (y) for supervised contrastive learning. Skipping.")
                     return None
                 
-                # Prepare data with labels
-                X_tensor = torch.FloatTensor(X).to(device)
-                y_tensor = torch.LongTensor(y).to(device)
-                dataset = TensorDataset(X_tensor, y_tensor)
-                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+                # STRATIFIED train/test split to maintain class balance
+                # This avoids data leakage while ensuring representative class distribution
+                from sklearn.model_selection import train_test_split
+                test_size = self.params.get('test_size', 0.2)
+                random_state = self.params.get('random_state', 42)
+                
+                train_idx, test_idx = train_test_split(
+                    np.arange(len(X)),
+                    test_size=test_size,
+                    stratify=y,  # STRATIFIED: maintain class proportions
+                    random_state=random_state
+                )
+                X_train, y_train = X[train_idx], y[train_idx]
+                X_test = X[test_idx]
+                
+                # Prepare training data with labels
+                X_train_tensor = torch.FloatTensor(X_train).to(device)
+                y_train_tensor = torch.LongTensor(y_train).to(device)
+                train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
                 
                 # Create model
                 self.model = ContrastiveEncoder(X.shape[1], hidden_dim, encoding_dim).to(device)
                 optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
                 
-                # Train
+                # Train on training set only
                 self.model.train()
                 for epoch in range(epochs):
                     epoch_loss = 0.0
                     n_batches = 0
-                    for batch_X, batch_y in dataloader:
+                    for batch_X, batch_y in train_loader:
                         optimizer.zero_grad()
                         z = self.model(batch_X)
                         loss = supervised_contrastive_loss(z, batch_y, temperature)
@@ -749,14 +804,21 @@ class CEEDReducer(DimensionalityReductionBase):
                         # Uncomment for debugging:
                         # print(f"CEED Epoch {epoch}/{epochs}, Loss: {avg_loss:.4f}")
                 
-                # Encode all data
+                # Encode TEST set only (never seen during training)
                 self.model.eval()
+                X_test_tensor = torch.FloatTensor(X_test).to(device)
                 with torch.no_grad():
-                    encoded = self.model(X_tensor)
-                    return encoded.cpu().numpy()
+                    encoded = self.model(X_test_tensor)
+                    return encoded.cpu().numpy(), test_idx
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return self._validate_output(result)
+            if result is None:
+                return None
+            
+            # Store test indices in metadata for downstream alignment
+            encoded_data, test_indices = result
+            self.test_indices = test_indices
+            return self._validate_output(encoded_data)
         except ImportError:
             print("PyTorch not installed. Install with: pip install torch")
             return None

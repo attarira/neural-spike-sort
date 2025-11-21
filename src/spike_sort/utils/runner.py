@@ -126,6 +126,9 @@ class ExperimentRunner:
             result['dim_reduction_metadata'] = reducer.get_metadata()
             result['reduced_shape'] = X_reduced.shape
             
+            # Note: Train/test split handling for deep learning methods is done
+            # in the caching layer (see run_with_cache function)
+            
             # Step 2: Clustering
             clusterer = create_clustering(clustering_method, **clustering_params)
             if clusterer is None:
@@ -140,6 +143,7 @@ class ExperimentRunner:
             result['clustering_metadata'] = clusterer.get_metadata()
             
             # Step 3: Evaluation
+            # Note: This path is rarely used; most experiments go through the caching layer
             evaluation_results = evaluate_all(X_reduced, labels, y)
             result['evaluation'] = evaluation_results
             
@@ -191,8 +195,13 @@ class ExperimentRunner:
             X_reduced = reducer.fit_transform(X, y)
             if X_reduced is None:
                 continue
+            
+            # Cache test_indices for deep learning methods (to handle train/test splits)
+            test_indices = getattr(reducer, 'test_indices', None)
+            
             embeddings_cache[key] = {
                 'X_reduced': X_reduced,
+                'test_indices': test_indices,  # Store test indices for alignment
                 'metadata': reducer.get_metadata(),
                 'reduced_shape': X_reduced.shape,
                 'dim_method': dim_method,
@@ -238,10 +247,22 @@ class ExperimentRunner:
                 return base
             try:
                 X_reduced = cache['X_reduced']
+                test_indices = cache.get('test_indices', None)  # Retrieve test indices from cache
                 params = dict(exp['clust_params'])
                 method = exp['clust_method']
                 n_samples = X_reduced.shape[0]
                 n_features = X_reduced.shape[1]
+                
+                # Handle train/test split for deep learning methods
+                y_eval = y
+                if test_indices is not None:
+                    base['used_train_test_split'] = True
+                    base['test_size'] = len(test_indices)
+                    base['train_size'] = len(X) - len(test_indices)
+                    if y is not None:
+                        y_eval = y[test_indices]
+                else:
+                    base['used_train_test_split'] = False
                 if method in ('HMM',):
                     if n_features > 64 or params.get('n_components', 1) > max(50, n_samples // 10):
                         base['error'] = 'HMM skipped due to high dimensionality/too many components'
@@ -266,7 +287,8 @@ class ExperimentRunner:
                 # Avoid metric errors for degenerate labelings
                 n_unique = len(np.unique(labels))
                 if 2 <= n_unique <= (n_samples - 1):
-                    evaluation_results = evaluate_all(X_reduced, labels, y)
+                    # Use y_eval (aligned with test set) instead of full y
+                    evaluation_results = evaluate_all(X_reduced, labels, y_eval)
                 else:
                     evaluation_results = {}
                 base['evaluation'] = evaluation_results
