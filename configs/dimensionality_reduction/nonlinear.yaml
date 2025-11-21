@@ -26,6 +26,42 @@ dimensionality_reduction:
       n_components: 10
     - n_neighbors: 20
       n_components: 10
+  ModifiedLLE:
+    - n_neighbors: 10
+      n_components: 10
+    - n_neighbors: 20
+      n_components: 10
   LaplacianEigenmaps:
     - n_components: 10
       n_neighbors: 10
+  KPCA:
+    - n_components: 10
+      kernel: rbf
+      gamma: 0.1
+    - n_components: 10
+      kernel: rbf
+      gamma: 0.01
+    - n_components: 10
+      kernel: poly
+      degree: 3
+  DiffusionMaps:
+    - n_components: 10
+      n_neighbors: 10
+    - n_components: 10
+      n_neighbors: 20
+  PHATE:
+    - n_components: 10
+      knn: 5
+    - n_components: 10
+      knn: 10
+    - n_components: 2
+      knn: 5
+  TriMap:
+    - n_components: 10
+      n_inliers: 10
+      n_outliers: 5
+      n_random: 5
+    - n_components: 2
+      n_inliers: 10
+      n_outliers: 5
+      n_random: 5

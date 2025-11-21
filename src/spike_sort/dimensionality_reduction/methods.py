@@ -252,6 +252,154 @@ class LLEReducer(DimensionalityReductionBase):
             return None
 
 
+class ModifiedLLEReducer(DimensionalityReductionBase):
+    """Modified Locally Linear Embedding."""
+    
+    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        try:
+            def _fit():
+                params = self.params.copy()
+                params['method'] = 'modified'
+                self.model = LocallyLinearEmbedding(**params)
+                return self.model.fit_transform(X)
+            
+            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+            return result
+        except Exception as e:
+            print(f"Modified LLE failed: {str(e)}")
+            return None
+
+
+class KPCAReducer(DimensionalityReductionBase):
+    """Kernel Principal Component Analysis."""
+    
+    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        try:
+            from sklearn.decomposition import KernelPCA
+            
+            def _fit():
+                self.model = KernelPCA(**self.params)
+                return self.model.fit_transform(X)
+            
+            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+            return result
+        except Exception as e:
+            print(f"KPCA failed: {str(e)}")
+            return None
+
+
+class DiffusionMapsReducer(DimensionalityReductionBase):
+    """Diffusion Maps using pydiffmap library or custom implementation."""
+    
+    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        try:
+            def _fit():
+                # Try using pydiffmap if available, otherwise use a custom implementation
+                try:
+                    from pydiffmap import diffusion_map as dm
+                    n_components = self.params.get('n_components', 10)
+                    epsilon = self.params.get('epsilon', 'bgh')
+                    alpha = self.params.get('alpha', 0.5)
+                    
+                    mydmap = dm.DiffusionMap.from_sklearn(
+                        n_evecs=n_components,
+                        epsilon=epsilon,
+                        alpha=alpha
+                    )
+                    self.model = mydmap
+                    return mydmap.fit_transform(X)
+                except ImportError:
+                    # Fallback: use Laplacian Eigenmaps as approximation
+                    print("Warning: pydiffmap not available, using Laplacian Eigenmaps as approximation")
+                    params = {
+                        'n_components': self.params.get('n_components', 10),
+                        'n_neighbors': self.params.get('n_neighbors', 10),
+                        'affinity': 'rbf'
+                    }
+                    self.model = SpectralEmbedding(**params)
+                    return self.model.fit_transform(X)
+            
+            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+            return result
+        except Exception as e:
+            print(f"Diffusion Maps failed: {str(e)}")
+            return None
+
+
+class PHATEReducer(DimensionalityReductionBase):
+    """PHATE (Potential of Heat-diffusion for Affinity-based Transition Embedding)."""
+    
+    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        try:
+            def _fit():
+                try:
+                    import phate
+                    self.model = phate.PHATE(**self.params)
+                    return self.model.fit_transform(X)
+                except ImportError:
+                    print("Warning: phate library not available. Install with: pip install phate")
+                    print("Falling back to t-SNE as approximation")
+                    params = {
+                        'n_components': self.params.get('n_components', 2),
+                        'perplexity': self.params.get('knn', 5),
+                    }
+                    self.model = TSNE(**params)
+                    return self.model.fit_transform(X)
+            
+            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+            return result
+        except Exception as e:
+            print(f"PHATE failed: {str(e)}")
+            return None
+
+
+class TriMapReducer(DimensionalityReductionBase):
+    """TriMap dimensionality reduction."""
+    
+    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        try:
+            def _fit():
+                try:
+                    import trimap
+                    n_components = self.params.get('n_components', 2)
+                    n_inliers = self.params.get('n_inliers', 10)
+                    n_outliers = self.params.get('n_outliers', 5)
+                    n_random = self.params.get('n_random', 5)
+                    
+                    self.model = trimap.TRIMAP(
+                        n_dims=n_components,
+                        n_inliers=n_inliers,
+                        n_outliers=n_outliers,
+                        n_random=n_random
+                    )
+                    return self.model.fit_transform(X)
+                except ImportError:
+                    print("Warning: trimap library not available. Install with: pip install trimap")
+                    print("Falling back to UMAP as approximation")
+                    try:
+                        import umap
+                        params = {
+                            'n_components': self.params.get('n_components', 2),
+                            'n_neighbors': self.params.get('n_inliers', 10),
+                        }
+                        self.model = umap.UMAP(**params)
+                        return self.model.fit_transform(X)
+                    except ImportError:
+                        print("Warning: umap library also not available. Using t-SNE")
+                        params = {
+                            'n_components': self.params.get('n_components', 2),
+                            'perplexity': min(30, X.shape[0] // 4),
+                        }
+                        self.model = TSNE(**params)
+                        return self.model.fit_transform(X)
+            
+            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+            return result
+        except Exception as e:
+            print(f"TriMap failed: {str(e)}")
+            return None
+
+
 class AutoencoderReducer(DimensionalityReductionBase):
     """Autoencoder-based dimensionality reduction."""
     
@@ -882,19 +1030,31 @@ def create_reducer(method_name: str, **params) -> Optional[DimensionalityReducti
         DimensionalityReductionBase instance or None if method not found
     """
     reducers = {
+        # Linear methods
         'PCA': PCAReducer,
         'ICA': ICAReducer,
         # 'CCA': CCAReducer,  # NOT APPLICABLE: requires two data views
         # 'LDA': LDAReducer,  # NOT APPLICABLE: requires ground truth labels
+        
+        # Nonlinear methods
+        'KPCA': KPCAReducer,
         'TSNE': TSNEReducer,
         't-SNE': TSNEReducer,
         'UMAP': UMAPReducer,
         'Isomap': IsomapReducer,
         'LaplacianEigenmaps': LaplacianEigenmapsReducer,
         'LLE': LLEReducer,
+        'ModifiedLLE': ModifiedLLEReducer,
+        'DiffusionMaps': DiffusionMapsReducer,
+        'PHATE': PHATEReducer,
+        'TriMap': TriMapReducer,
+        
+        # Deep learning methods
         'Autoencoder': AutoencoderReducer,
         'VAE': VAEReducer,
         'CEED': CEEDReducer,
+        
+        # NOT APPLICABLE methods (commented out)
         # 'GPFA': GPFAReducer,  # NOT APPLICABLE: designed for temporal population dynamics
         # 'SliceTCA': SliceTCAReducer,  # NOT APPLICABLE: designed for tensor-structured data
         # 'LFADS': LFADSReducer,  # NOT APPLICABLE: designed for temporal sequential data

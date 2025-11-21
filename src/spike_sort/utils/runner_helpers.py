@@ -49,12 +49,34 @@ def create_synthetic_recording(
     Returns:
         Tuple of (static_recording, drift_recording, ground_truth_sorting)
     """
+    # Scale drift parameters based on duration to avoid assertion errors
+    # Default t_start_drift is 60s, which fails for short recordings
+    # Use 10% of duration as drift start, with a minimum of 0.5s
+    t_start_drift = max(0.5, duration * 0.1)
+    # Period should be reasonable relative to duration
+    period_s = max(20.0, duration * 0.5)
+    
+    generate_displacement_vector_kwargs = {
+        'displacement_sampling_frequency': 5.0,
+        'drift_start_um': [0, 20],
+        'drift_stop_um': [0, -20],
+        'drift_step_um': 1,
+        'motion_list': [{
+            'drift_mode': 'zigzag',
+            'non_rigid_gradient': None,
+            't_start_drift': t_start_drift,
+            't_end_drift': None,
+            'period_s': period_s
+        }]
+    }
+    
     static_rec, drift_rec, gt_sorting = si.generate_drifting_recording(
         probe_name         = probe_name,
         num_units          = num_units,
         duration           = duration,
         sampling_frequency = sampling_frequency,
         seed               = seed,
+        generate_displacement_vector_kwargs = generate_displacement_vector_kwargs,
     )
     return static_rec, drift_rec, gt_sorting
 
