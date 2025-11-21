@@ -298,6 +298,16 @@ def create_dimensionality_grid(
         params: List[Dict[str, Any]] = []
         for n_nb in neighbor_vals:
             for comp in manifold_dims:
+                # ModifiedLLE requires n_neighbors >= n_components
+                if method == "ModifiedLLE" and n_nb < comp:
+                    continue
+                # Ensure n_neighbors < n_samples for all graph-based methods
+                if n_nb >= n_samples:
+                    continue
+                # Ensure n_components < n_samples
+                if comp >= n_samples:
+                    continue
+                    
                 entry = {"n_neighbors": n_nb, "n_components": comp}
                 if method == "DiffusionMaps":
                     for alpha in (0.5, 1.0):
@@ -307,22 +317,28 @@ def create_dimensionality_grid(
         config[method] = params
 
     # --- Stochastic neighbor methods ---------------------------------------
+    # t-SNE requires perplexity < n_samples and typically perplexity < n_samples/3
     perplexities = [p for p in (20, 30, 50) if p < (n_samples - 1) / 3]
     if not perplexities:
         fallback = max(5, min(30, (n_samples - 1) // 3))
         perplexities = [fallback]
     tsne_dims = sorted({2, max(2, min(3, d_star))})
-    config["TSNE"] = [
-        {
-            "perplexity": float(perp),
-            "n_components": comp,
-            "learning_rate": "auto",
-            "init": "pca",
-            "n_iter": 1000,
-        }
-        for perp in perplexities
-        for comp in tsne_dims
-    ]
+    # Ensure n_components < n_samples for t-SNE
+    tsne_dims = [d for d in tsne_dims if d < n_samples]
+    if tsne_dims:
+        config["TSNE"] = [
+            {
+                "perplexity": float(perp),
+                "n_components": comp,
+                "learning_rate": "auto",
+                "init": "pca",
+                "n_iter": 1000,
+            }
+            for perp in perplexities
+            for comp in tsne_dims
+        ]
+    else:
+        config["TSNE"] = []
 
     # --- UMAP & relatives ---------------------------------------------------
     umap_neighbors = sorted(set(neighbor_vals + [10, 20, 50]))
@@ -332,43 +348,57 @@ def create_dimensionality_grid(
     if not umap_neighbors:
         umap_neighbors = [min(10, max(2, n_samples - 1))]
     umap_dims = sorted({2, max(2, min(3, d_star)), max(2, int(d_star))})
-    config["UMAP"] = [
-        {
-            "n_neighbors": n_nb,
-            "min_dist": min_dist,
-            "n_components": comp,
-            "metric": "euclidean",
-            "random_state": 42,
-        }
-        for n_nb in umap_neighbors
-        for min_dist in (0.0, 0.1, 0.3)
-        for comp in umap_dims
-    ]
+    # Ensure n_components < n_samples for UMAP
+    umap_dims = [d for d in umap_dims if d < n_samples]
+    if umap_dims:
+        config["UMAP"] = [
+            {
+                "n_neighbors": n_nb,
+                "min_dist": min_dist,
+                "n_components": comp,
+                "metric": "euclidean",
+                "random_state": 42,
+            }
+            for n_nb in umap_neighbors
+            for min_dist in (0.0, 0.1, 0.3)
+            for comp in umap_dims
+        ]
+    else:
+        config["UMAP"] = []
 
     # --- Density-preserving global methods ---------------------------------
-    config["PHATE"] = [
-        {
-            "knn": min(max(5, n_nb), n_samples - 1),
-            "decay": 40,
-            "t": "auto",
-            "n_components": comp,
-        }
-        for n_nb in neighbor_vals
-        for comp in (2, max(2, int(d_star)))
-    ]
+    phate_dims = [d for d in (2, max(2, int(d_star))) if d < n_samples]
+    if phate_dims:
+        config["PHATE"] = [
+            {
+                "knn": min(max(5, n_nb), n_samples - 1),
+                "decay": 40,
+                "t": "auto",
+                "n_components": comp,
+            }
+            for n_nb in neighbor_vals
+            for comp in phate_dims
+        ]
+    else:
+        config["PHATE"] = []
 
-    config["TriMap"] = [
-        {
-            "n_dims": comp,
-            "n_inliers": inliers,
-            "n_outliers": outliers,
-            "n_random": 5,
-            "distance_metric": "euclidean",
-        }
-        for comp in (2, max(2, int(d_star)))
-        for inliers in (10, 20)
-        for outliers in (5, 10)
-    ]
+    trimap_dims = [d for d in (2, max(2, int(d_star))) if d < n_samples]
+    if trimap_dims:
+        config["TriMap"] = [
+            {
+                "n_dims": comp,
+                "n_inliers": inliers,
+                "n_outliers": outliers,
+                "n_random": 5,
+                "distance_metric": "euclidean",
+            }
+            for comp in trimap_dims
+            for inliers in (10, 20)
+            for outliers in (5, 10)
+            if inliers < n_samples  # Ensure n_inliers < n_samples
+        ]
+    else:
+        config["TriMap"] = []
 
     # --- Deep learning methods ---------------------------------------------
     encoding_dim = max(2, int(d_star))

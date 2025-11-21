@@ -75,6 +75,32 @@ class DimensionalityReductionBase(ABC):
             print(f"Error in {self.__class__.__name__}: {str(e)}")
             return None, time.time() - start_time, 0.0
     
+    def _validate_output(self, result: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """
+        Validate that the output doesn't contain NaN or Inf values.
+        
+        Args:
+            result: The embedding result to validate
+            
+        Returns:
+            The result if valid, None otherwise
+        """
+        if result is None:
+            return None
+        
+        if not isinstance(result, np.ndarray):
+            return result
+        
+        if np.any(np.isnan(result)):
+            print(f"Error in {self.__class__.__name__}: Output contains NaN values")
+            return None
+        
+        if np.any(np.isinf(result)):
+            print(f"Error in {self.__class__.__name__}: Output contains Inf values")
+            return None
+        
+        return result
+    
     def get_metadata(self) -> Dict[str, Any]:
         """Return metadata about the reduction."""
         return {
@@ -95,7 +121,7 @@ class PCAReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"PCA failed: {str(e)}")
             return None
@@ -111,7 +137,7 @@ class ICAReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"ICA failed: {str(e)}")
             return None
@@ -177,7 +203,7 @@ class TSNEReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"t-SNE failed: {str(e)}")
             return None
@@ -195,7 +221,7 @@ class UMAPReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except ImportError:
             print("UMAP not installed. Install with: pip install umap-learn")
             return None
@@ -214,7 +240,7 @@ class IsomapReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"Isomap failed: {str(e)}")
             return None
@@ -230,7 +256,7 @@ class LaplacianEigenmapsReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"Laplacian Eigenmaps failed: {str(e)}")
             return None
@@ -246,7 +272,7 @@ class LLEReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"LLE failed: {str(e)}")
             return None
@@ -264,7 +290,7 @@ class ModifiedLLEReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"Modified LLE failed: {str(e)}")
             return None
@@ -282,7 +308,7 @@ class KPCAReducer(DimensionalityReductionBase):
                 return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"KPCA failed: {str(e)}")
             return None
@@ -309,18 +335,37 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                     self.model = mydmap
                     return mydmap.fit_transform(X)
                 except ImportError:
-                    # Fallback: use Laplacian Eigenmaps as approximation
-                    print("Warning: pydiffmap not available, using Laplacian Eigenmaps as approximation")
+                    # Fallback: use Laplacian Eigenmaps as approximation with robust parameters
+                    n_samples = X.shape[0]
+                    n_components = min(self.params.get('n_components', 10), n_samples - 2)
+                    n_neighbors = min(self.params.get('n_neighbors', 10), n_samples - 1)
+                    
+                    # Ensure n_components is valid
+                    if n_components < 2:
+                        print(f"Warning: Too few samples ({n_samples}) for DiffusionMaps, need at least 3")
+                        return None
+                    
+                    # Use dense solver for small datasets to avoid ARPACK convergence issues
+                    eigen_solver = 'dense' if n_samples < 500 else 'arpack'
+                    
                     params = {
-                        'n_components': self.params.get('n_components', 10),
-                        'n_neighbors': self.params.get('n_neighbors', 10),
-                        'affinity': 'rbf'
+                        'n_components': n_components,
+                        'n_neighbors': n_neighbors,
+                        'affinity': 'rbf',
+                        'eigen_solver': eigen_solver,
+                        'n_jobs': 1,
                     }
+                    
+                    # Add ARPACK-specific parameters for larger datasets
+                    if eigen_solver == 'arpack':
+                        params['eigen_tol'] = 1e-4
+                        params['max_iter'] = 2000
+                    
                     self.model = SpectralEmbedding(**params)
                     return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"Diffusion Maps failed: {str(e)}")
             return None
@@ -347,7 +392,7 @@ class PHATEReducer(DimensionalityReductionBase):
                     return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"PHATE failed: {str(e)}")
             return None
@@ -394,7 +439,7 @@ class TriMapReducer(DimensionalityReductionBase):
                         return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except Exception as e:
             print(f"TriMap failed: {str(e)}")
             return None
@@ -470,7 +515,7 @@ class AutoencoderReducer(DimensionalityReductionBase):
                     return encoded.cpu().numpy()
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except ImportError:
             print("PyTorch not installed. Install with: pip install torch")
             return None
@@ -564,7 +609,7 @@ class VAEReducer(DimensionalityReductionBase):
                     return mu.cpu().numpy()
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except ImportError:
             print("PyTorch not installed. Install with: pip install torch")
             return None
@@ -711,7 +756,7 @@ class CEEDReducer(DimensionalityReductionBase):
                     return encoded.cpu().numpy()
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
-            return result
+            return self._validate_output(result)
         except ImportError:
             print("PyTorch not installed. Install with: pip install torch")
             return None
