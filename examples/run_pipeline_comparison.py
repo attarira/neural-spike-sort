@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-Compare raw-vs-PCA-preprocessed dimensionality reduction pipelines on synthetic data.
+Compare dimensionality reduction + clustering combinations on synthetic spike data.
 
 Workflow
 --------
 1. Generate SpikeInterface drifting recordings (≈20 units, ~1 minute) and extract spike features.
 2. Derive intrinsic PCA dimension d* per dataset using an explained-variance rule (≥98%, cap at 20).
-3. Run two pipelines for each dimensionality reduction (DR) method & clusterer pair:
-   - raw → DR → clustering
-   - PCA (to d*) → DR → clustering
-4. Tune each (DR, pipeline, clusterer) configuration on small, theory-backed grids to maximize ARI.
-5. Report ARI (primary), V-measure, NMI, and optional unsupervised metrics plus correlations.
+3. Preprocess features with PCA to d* (whitened, decorrelated representation).
+4. Evaluate DR methods (PCA, ICA, UMAP, t-SNE, manifold methods, deep learning) with clustering.
+5. Tune (DR, clusterer) configurations on theory-backed grids to maximize ARI.
+6. Report ARI (primary), V-measure, NMI, and optional unsupervised metrics plus correlations.
+
+Rationale
+---------
+All DR methods receive PCA-preprocessed input because:
+  - Many manifold learners (Isomap/LLE/UMAP/etc) assume isotropic/whitened spaces
+  - Raw waveforms have correlated dimensions with amplitude-dominated variance
+  - PCA preprocessing decorrelates features and improves numerical conditioning
 
 Run:
     python examples/run_pipeline_comparison.py --num-datasets 2 --output-dir ./results/pipeline_cmp
@@ -59,7 +65,7 @@ DR_GROUPS: Dict[str, Set[str]] = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare raw vs PCA-preprocessed DR pipelines on synthetic spike datasets.",
+        description="Evaluate DR + clustering combinations on PCA-preprocessed spike features.",
     )
     parser.add_argument("--num-datasets", type=int, default=2, help="Number of synthetic datasets/seeds.")
     parser.add_argument(
@@ -103,12 +109,17 @@ def parse_args() -> argparse.Namespace:
         help="Upper bound on PCA components fitted before truncation.",
     )
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel jobs passed to ExperimentRunner.")
-    parser.add_argument("--output-dir", type=str, default="./results/pipeline_comparison", help="Output directory.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./results/pipeline_comparison",
+        help="Output directory for results, metadata, and analysis.",
+    )
     parser.add_argument(
         "--results-name",
         type=str,
         default="pipeline_comparison",
-        help="Base filename for serialized ExperimentRunner results.",
+        help="Base filename for serialized ExperimentRunner results (pkl/json).",
     )
     parser.add_argument(
         "--pca-train-fraction",
@@ -242,20 +253,49 @@ def _estimate_distance_scale(X: np.ndarray, rng: np.random.Generator, sample_siz
 
 
 def _component_options(d_star: int) -> List[int]:
+    """Generate dimensionality options for PCA and similar methods.
+    
+    Uses coarse fractions of d* to probe compression vs noise trade-offs:
+    - Always include d*/2 and d* (the "sweet spot" range)
+    - Add d*/4 only when d* >= 12 (otherwise it's too small to be useful)
+    
+    This avoids fine-grained spacing (like 3/4 d*) that provides diminishing returns.
+    """
     base = max(2, int(d_star))
-    half = max(2, int(d_star // 2))
-    # Evaluating both d* and d*/2 lets us test whether more aggressive bottlenecks help.
-    return sorted({base, half})
+    half = max(2, int(round(d_star / 2)))
+    quarter = max(2, int(round(d_star / 4)))
+    
+    # Only include quarter if d* is reasonably large
+    if d_star >= 12:
+        return sorted({quarter, half, base})
+    else:
+        return sorted({half, base})
 
 
 def _manifold_components(d_star: int) -> List[int]:
-    vals = {
-        max(2, min(5, d_star)),
-        max(2, min(10, d_star)),
-        max(2, d_star),
-    }
-    # Keep a small ladder of latent widths for manifold learners (coarse / medium / d*).
-    return sorted(vals)
+    """Generate dimensionality options for manifold learning methods.
+    
+    Uses a coarse ladder of dimensions to test different compression levels:
+    - Low dimension (2 or d*/4): Tests aggressive compression
+    - Medium dimension (d*/2): Balanced compression
+    - Full dimension (d*): Preserves most structure
+    
+    When d* is small, we use fixed small values to avoid over-compression.
+    When d* is large (>= 12), we add d*/4 to explore aggressive bottlenecks.
+    """
+    base = max(2, int(d_star))
+    half = max(2, int(round(d_star / 2)))
+    
+    if d_star >= 12:
+        # Large d*: use fractions including aggressive compression (d*/4)
+        quarter = max(2, int(round(d_star / 4)))
+        return sorted({quarter, half, base})
+    elif d_star >= 8:
+        # Medium d*: use {2, d*/2, d*} for coarse sampling
+        return sorted({2, half, base})
+    else:
+        # Small d*: just use {2, d*} to avoid redundancy
+        return sorted({2, base})
 
 
 def create_dimensionality_grid(
@@ -487,9 +527,14 @@ def prepare_dataset(
     seed: int,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    """
-    Generate a synthetic recording, extract spike-waveform features, and compute the PCA
-    preprocessing statistics that define the PCA→DR pipeline for this dataset.
+    """Generate synthetic recording and prepare PCA-preprocessed features.
+    
+    Returns a dataset dict containing:
+        - X_raw: Raw spike features (for reference/distance estimation)
+        - X_pca: PCA-preprocessed features (main input to DR methods)
+        - labels: Ground-truth spike labels
+        - d_star: Intrinsic dimensionality (PCA components retained)
+        - Metadata: Dataset name, seed, true_k, distance_scale, etc.
     """
     static_rec, _, gt_sorting = create_synthetic_recording(
         num_units=args.num_units,
@@ -536,43 +581,61 @@ def prepare_dataset(
     }
 
 
-def run_pipeline_variant(
+def run_single_pipeline(
     runner: ExperimentRunner,
     dataset: Dict[str, Any],
-    pipeline_variant: str,
     config: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    X = dataset["X_raw"] if pipeline_variant == "raw" else dataset["X_pca"]
-    dataset_name = f"{dataset['dataset_name']}_{pipeline_variant}"
-    # ExperimentRunner reuses cached embeddings when the same reducer hyperparameters repeat,
-    # so we simply feed it the filtered configuration for each pipeline.
+    """Run experiments on PCA-preprocessed features for a single dataset.
+    
+    Args:
+        runner: ExperimentRunner instance
+        dataset: Dataset dict containing X_pca, labels, and metadata
+        config: Combined DR + clustering configuration
+        
+    Returns:
+        List of result dictionaries with metadata attached
+    """
+    X_preprocessed = dataset["X_pca"]
+    dataset_name = dataset["dataset_name"]
+    
     results = runner.run_experiments(
-        X=X,
+        X=X_preprocessed,
         config=config,
         y=dataset["labels"],
         dataset_name=dataset_name,
     )
+    
+    # Attach dataset metadata to each result
     for result in results:
-        result["pipeline_variant"] = pipeline_variant
         result["dataset_idx"] = dataset["dataset_idx"]
         result["dataset_seed"] = dataset["seed"]
         result["d_star"] = dataset["d_star"]
         result["true_k"] = dataset["true_k"]
         result["n_spikes"] = dataset["n_spikes"]
         result["n_features_raw"] = dataset["n_features"]
+        result["n_features_preprocessed"] = dataset["X_pca"].shape[1]
     return results
 
 
 def build_results_dataframe(results: Sequence[Dict[str, Any]]) -> pd.DataFrame:
+    """Flatten experiment results into a DataFrame for analysis.
+    
+    Args:
+        results: List of result dictionaries from ExperimentRunner
+        
+    Returns:
+        DataFrame with flattened metrics and serialized parameter configurations
+    """
     rows: List[Dict[str, Any]] = []
     for res in results:
         if not res.get("success"):
             continue
         evaluation = res.get("evaluation") or {}
-        # Flatten the nested ExperimentRunner record into a tabular row so that we can group
-        # by (pipeline, DR, clusterer) and compare metrics downstream.
         row = {
-            "pipeline_variant": res.get("pipeline_variant"),
+            "dataset_name": res.get("dataset_name"),
+            "dataset_idx": res.get("dataset_idx"),
+            "dataset_seed": res.get("dataset_seed"),
             "dim_reduction_method": res.get("dim_reduction_method"),
             "clustering_method": res.get("clustering_method"),
             "ari": evaluation.get("adjusted_rand_index"),
@@ -583,25 +646,41 @@ def build_results_dataframe(results: Sequence[Dict[str, Any]]) -> pd.DataFrame:
             "calinski_harabasz": evaluation.get("calinski_harabasz_index"),
             "dim_params": json.dumps(res.get("dim_reduction_params", {}), sort_keys=True),
             "clust_params": json.dumps(res.get("clustering_params", {}), sort_keys=True),
+            "d_star": res.get("d_star"),
+            "true_k": res.get("true_k"),
+            "n_spikes": res.get("n_spikes"),
         }
         rows.append(row)
     return pd.DataFrame(rows)
 
 
-def select_best_configs(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def select_best_configs(df: pd.DataFrame) -> pd.DataFrame:
+    """Select the best hyperparameter configuration for each (DR, clusterer) pair.
+    
+    Best configurations are determined by averaging ARI across all dataset seeds,
+    with V-measure and NMI as tie-breakers.
+    
+    Args:
+        df: Results DataFrame with columns for metrics and parameters
+        
+    Returns:
+        DataFrame with best configuration per (DR method, clustering method) pair
+    """
     if df.empty or "ari" not in df:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
+    
     metric_df = df.dropna(subset=["ari"]).copy()
     if metric_df.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
+    
     group_cols = [
-        "pipeline_variant",
         "dim_reduction_method",
         "clustering_method",
         "dim_params",
         "clust_params",
     ]
-    # Average ARI (and tie-breaker metrics) over seeds to score each hyperparameter combo.
+    
+    # Average ARI (and tie-breaker metrics) over seeds to score each hyperparameter combo
     summary = (
         metric_df.groupby(group_cols, as_index=False)[["ari", "v_measure", "nmi"]]
         .mean()
@@ -609,7 +688,7 @@ def select_best_configs(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     )
 
     def pick_best(group: pd.DataFrame) -> pd.Series:
-        # Deterministic ranking order: ARI primary, V-measure and NMI as tie-breakers.
+        # Deterministic ranking order: ARI primary, V-measure and NMI as tie-breakers
         ordered = group.sort_values(
             by=["ari", "v_measure", "nmi"],
             ascending=[False, False, False],
@@ -618,12 +697,13 @@ def select_best_configs(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     best = (
         summary.groupby(
-            ["pipeline_variant", "dim_reduction_method", "clustering_method"],
+            ["dim_reduction_method", "clustering_method"],
             group_keys=False,
         )
         .apply(pick_best)
         .reset_index(drop=True)
     )
+    
     best = best.rename(
         columns={
             "ari": "best_ari",
@@ -633,28 +713,11 @@ def select_best_configs(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     )
     best["dim_reduction_params"] = best["dim_params"].apply(json.loads)
     best["clustering_params"] = best["clust_params"].apply(json.loads)
-
-    comparison = (
-        best.pivot_table(
-            index=["dim_reduction_method", "clustering_method"],
-            columns="pipeline_variant",
-            values="best_ari",
-        )
-        .reset_index()
-    )
-    if "pca_pre" not in comparison.columns:
-        comparison["pca_pre"] = np.nan
-    if "raw" not in comparison.columns:
-        comparison["raw"] = np.nan
-    comparison["delta_ari"] = comparison["pca_pre"] - comparison["raw"]
-    comparison = comparison.sort_values(
-        by=["delta_ari"],
-        ascending=False,
-        na_position="last",
-    )
-    comparison.columns.name = None
-
-    return best, comparison
+    
+    # Sort by best ARI descending
+    best = best.sort_values(by="best_ari", ascending=False)
+    
+    return best
 
 
 def compute_unsupervised_correlations(df: pd.DataFrame) -> Dict[str, float]:
@@ -709,33 +772,21 @@ def main() -> None:
 
         include_supervised = dataset["labels"] is not None  # enables CEED only when GT labels exist
         neighbor_vals = _neighbor_candidates(dataset["n_spikes"])
-        raw_dim_grid = create_dimensionality_grid(
+        
+        # Build DR grid using PCA-preprocessed features as reference
+        dim_grid = create_dimensionality_grid(
             d_star=dataset["d_star"],
-            X_reference=dataset["X_raw"],
+            X_reference=dataset["X_pca"],
             include_supervised=include_supervised,
             rng=np.random.default_rng(seed + 17),
             neighbor_vals=neighbor_vals,
         )
-        raw_dim_grid = filter_dimensionality_grid(raw_dim_grid, enabled_methods)
-        if not raw_dim_grid:
+        dim_grid = filter_dimensionality_grid(dim_grid, enabled_methods)
+        if not dim_grid:
             raise ValueError(
-                "No dimensionality-reduction methods left after applying --dr-groups "
-                "for the raw pipeline."
+                "No dimensionality-reduction methods left after applying --dr-groups filter."
             )
 
-        pca_dim_grid = create_dimensionality_grid(
-            d_star=dataset["d_star"],
-            X_reference=dataset["X_pca"],
-            include_supervised=include_supervised,
-            rng=np.random.default_rng(seed + 31),
-            neighbor_vals=neighbor_vals,
-        )
-        pca_dim_grid = filter_dimensionality_grid(pca_dim_grid, enabled_methods)
-        if not pca_dim_grid:
-            raise ValueError(
-                "No dimensionality-reduction methods left after applying --dr-groups "
-                "for the PCA-preprocessed pipeline."
-            )
         clustering_grid = create_clustering_grid(
             dataset["true_k"],
             dataset["distance_scale"],
@@ -743,41 +794,39 @@ def main() -> None:
             dataset["n_spikes"],
         )
 
-        # Feed the filtered DR configs into two pipelines: raw waveforms vs PCA-preprocessed.
-        raw_config = {"dimensionality_reduction": raw_dim_grid, "clustering": clustering_grid}
-        pca_config = {"dimensionality_reduction": pca_dim_grid, "clustering": clustering_grid}
-
-        all_results.extend(run_pipeline_variant(runner, dataset, "raw", raw_config))
-        all_results.extend(run_pipeline_variant(runner, dataset, "pca_pre", pca_config))
+        # Run single pipeline on PCA-preprocessed features
+        config = {"dimensionality_reduction": dim_grid, "clustering": clustering_grid}
+        all_results.extend(run_single_pipeline(runner, dataset, config))
 
     runner.save_results(filename=args.results_name)
 
     results_df = build_results_dataframe(all_results)
-    best_configs, comparison = select_best_configs(results_df)
+    best_configs = select_best_configs(results_df)
     correlations = compute_unsupervised_correlations(results_df)
 
     best_path = output_dir / "best_configs.csv"
-    summary_path = output_dir / "pipeline_comparison_summary.csv"
-    meta_path = output_dir / "pipeline_dataset_metadata.json"
+    full_results_path = output_dir / "all_results.csv"
+    meta_path = output_dir / "dataset_metadata.json"
     corr_path = output_dir / "unsupervised_metric_correlations.json"
 
     if not best_configs.empty:
         best_configs.to_csv(best_path, index=False)
-    if not comparison.empty:
-        comparison.to_csv(summary_path, index=False)
+        print(f"\nSaved best configurations (per DR + clustering method) to: {best_path}")
+    
+    if not results_df.empty:
+        results_df.to_csv(full_results_path, index=False)
+        print(f"Saved full results table to: {full_results_path}")
+    
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(dataset_summaries, f, indent=2)
-    with open(corr_path, "w", encoding="utf-8") as f:
-        json.dump(correlations, f, indent=2)
-
-    print("\n=== Pipeline Comparison Complete ===")
-    if not best_configs.empty:
-        print(f"Saved best configuration per (pipeline, DR, clusterer) to {best_path}")
-    if not comparison.empty:
-        print(f"Saved raw vs PCA-pre comparison table to {summary_path}")
-    print(f"Dataset metadata stored at {meta_path}")
+    print(f"Dataset metadata stored at: {meta_path}")
+    
     if correlations:
-        print(f"Unsupervised metric correlations stored at {corr_path}")
+        with open(corr_path, "w", encoding="utf-8") as f:
+            json.dump(correlations, f, indent=2)
+        print(f"Unsupervised metric correlations stored at: {corr_path}")
+
+    print("\n=== DR + Clustering Comparison Complete ===")
 
     analyzer = ResultsAnalyzer(all_results)
     print("\nSummary statistics across all runs:")
