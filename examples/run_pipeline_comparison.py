@@ -148,6 +148,17 @@ def parse_args() -> argparse.Namespace:
             "Choose one or more of {linear, nonlinear, deeplearning}."
         ),
     )
+    parser.add_argument(
+        "--d-star-values",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of d_star values to test (e.g., 3 5 8 12 20). "
+            "If provided, tests each value and reports the best. "
+            "If not provided, uses auto-computed d_star from variance threshold."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -550,11 +561,80 @@ def create_clustering_grid(
     }
 
 
+def preprocess_dataset_no_split(
+    X_raw: np.ndarray,
+    labels: np.ndarray,
+    args: argparse.Namespace,
+    seed: int,
+    d_star_override: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Preprocess data with PCA without train/test split.
+    
+    For methods that don't require validation (linear/nonlinear), we can use all data.
+    
+    Args:
+        X_raw: Raw spike features (n_samples, n_features)
+        labels: Ground truth labels
+        args: Argument namespace with configuration
+        seed: Random seed for reproducibility
+        d_star_override: If provided, use this d_star instead of computing from variance
+        
+    Returns:
+        data: Dict with X_pca, labels, d_star, etc.
+    """
+    pca_rng = np.random.default_rng(seed + 73)
+    
+    if d_star_override is not None:
+        # Use fixed d_star value
+        d_star = d_star_override
+        n_components = min(X_raw.shape[1], args.max_pca_fit, X_raw.shape[0])
+        pca_model = PCA(n_components=n_components, svd_solver="full")
+        pca_model.fit(X_raw)
+        cumulative_variance = np.cumsum(pca_model.explained_variance_ratio_).tolist()
+    else:
+        # Compute d_star from variance threshold
+        pca_result = determine_intrinsic_pca_dim(
+            X_raw,
+            variance_threshold=args.variance_threshold,
+            component_cap=args.max_pca_components,
+            fit_cap=args.max_pca_fit,
+            train_fraction=args.pca_train_fraction,  # Use fraction to avoid leakage in d_star estimation
+            rng=pca_rng,
+        )
+        pca_model = pca_result['pca_model']
+        d_star = pca_result['d_star']
+        cumulative_variance = pca_result['cumulative_variance']
+    
+    # Transform all data
+    X_pca = pca_model.transform(X_raw)[:, :d_star]
+    
+    # Compute hyperparameter statistics
+    distance_scale = _estimate_distance_scale(X_pca, rng=np.random.default_rng(seed + 19))
+    
+    data = {
+        'X_raw': X_raw,
+        'X_pca': X_pca,
+        'labels': labels,
+        'n_spikes': len(X_raw),
+        'd_star': d_star,
+        'distance_scale': distance_scale,
+        'pca_model': pca_model,
+        'cumulative_variance': cumulative_variance,
+    }
+    
+    variance_pct = cumulative_variance[d_star-1] if d_star <= len(cumulative_variance) else cumulative_variance[-1]
+    print(f"   Using all {len(X_raw)} spikes")
+    print(f"   d* = {d_star} (variance explained: {variance_pct:.1%})")
+    
+    return data
+
+
 def split_and_preprocess_dataset(
     X_raw: np.ndarray,
     labels: np.ndarray,
     args: argparse.Namespace,
     seed: int,
+    d_star_override: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Split data and fit PCA on training set only to avoid leakage.
     
@@ -569,6 +649,7 @@ def split_and_preprocess_dataset(
         labels: Ground truth labels
         args: Argument namespace with configuration
         seed: Random seed for reproducibility
+        d_star_override: If provided, use this d_star instead of computing from variance
         
     Returns:
         train_data: Dict with X_train, X_pca_train, labels_train, d_star, etc.
@@ -592,17 +673,27 @@ def split_and_preprocess_dataset(
     
     # Fit PCA on TRAINING set only
     pca_rng = np.random.default_rng(seed + 73)
-    pca_result = determine_intrinsic_pca_dim(
-        X_train,  # Only training data!
-        variance_threshold=args.variance_threshold,
-        component_cap=args.max_pca_components,
-        fit_cap=args.max_pca_fit,
-        train_fraction=1.0,  # Use all training data (already split)
-        rng=pca_rng,
-    )
     
-    pca_model = pca_result['pca_model']
-    d_star = pca_result['d_star']
+    if d_star_override is not None:
+        # Use fixed d_star value
+        d_star = d_star_override
+        n_components = min(X_train.shape[1], args.max_pca_fit, X_train.shape[0])
+        pca_model = PCA(n_components=n_components, svd_solver="full")
+        pca_model.fit(X_train)
+        cumulative_variance = np.cumsum(pca_model.explained_variance_ratio_).tolist()
+    else:
+        # Compute d_star from variance threshold
+        pca_result = determine_intrinsic_pca_dim(
+            X_train,  # Only training data!
+            variance_threshold=args.variance_threshold,
+            component_cap=args.max_pca_components,
+            fit_cap=args.max_pca_fit,
+            train_fraction=1.0,  # Use all training data (already split)
+            rng=pca_rng,
+        )
+        pca_model = pca_result['pca_model']
+        d_star = pca_result['d_star']
+        cumulative_variance = pca_result['cumulative_variance']
     
     # Transform train and test using training-fit PCA
     X_pca_train = pca_model.transform(X_train)[:, :d_star]
@@ -619,7 +710,7 @@ def split_and_preprocess_dataset(
         'd_star': d_star,
         'distance_scale': distance_scale,
         'pca_model': pca_model,
-        'cumulative_variance': pca_result['cumulative_variance'],
+        'cumulative_variance': cumulative_variance,
     }
     
     test_data = {
@@ -630,9 +721,9 @@ def split_and_preprocess_dataset(
         'indices': test_idx,  # Track which samples are in test set
     }
     
+    variance_pct = cumulative_variance[d_star-1] if d_star <= len(cumulative_variance) else cumulative_variance[-1]
     print(f"   Train/Test split: {len(X_train)} train, {len(X_test)} test")
-    print(f"   d* computed on training set: {d_star}")
-    print(f"   PCA variance explained: {pca_result['cumulative_variance'][d_star-1]:.1%}")
+    print(f"   d* = {d_star} (variance explained: {variance_pct:.1%})")
     
     return train_data, test_data
 
@@ -853,9 +944,15 @@ def main() -> None:
 
     # Translate the CLI group selection into the reducer names we keep in each configuration.
     enabled_methods = resolve_enabled_methods(args.dr_groups)
+    
+    # Check if we're using deep learning methods (which need train/test split)
+    has_deeplearning = bool(enabled_methods & DR_GROUPS["deeplearning"])
 
     all_results: List[Dict[str, Any]] = []
     dataset_summaries: List[Dict[str, Any]] = []
+    
+    # Track d_star performance if testing multiple values
+    d_star_performance: List[Dict[str, Any]] = []
 
     for idx, seed in enumerate(seeds):
         print(f"\n=== Dataset {idx + 1}/{len(seeds)} (seed={seed}) ===")
@@ -863,105 +960,159 @@ def main() -> None:
         # Step 1: Prepare raw dataset (NO PCA yet to avoid leakage)
         dataset = prepare_dataset(idx, seed, args)
         
-        # Step 2: Train/test split BEFORE any preprocessing
-        print(f"   Splitting data to avoid leakage...")
-        train_data, test_data = split_and_preprocess_dataset(
-            X_raw=dataset["X_raw"],
-            labels=dataset["labels"],
-            args=args,
-            seed=seed,
-        )
+        # Determine which d_star values to test
+        if args.d_star_values:
+            d_star_values = args.d_star_values
+            print(f"   Testing d_star values: {d_star_values}")
+        else:
+            d_star_values = [None]  # None means auto-compute
         
-        # Metadata for tracking
-        dataset_summaries.append(
-            {
+        # Test each d_star value
+        for d_star_test in d_star_values:
+            if d_star_test is not None:
+                print(f"\n   --- Testing d_star = {d_star_test} ---")
+            
+            # Step 2: Preprocess data (with or without train/test split)
+            if has_deeplearning:
+                # Deep learning needs train/test split to avoid overfitting
+                print(f"   Splitting data for deep learning methods...")
+                train_data, test_data = split_and_preprocess_dataset(
+                    X_raw=dataset["X_raw"],
+                    labels=dataset["labels"],
+                    args=args,
+                    seed=seed,
+                    d_star_override=d_star_test,
+                )
+                use_train_only = True
+            else:
+                # Linear/nonlinear methods can use all data
+                print(f"   Using all data (no split needed for linear/nonlinear methods)...")
+                train_data = preprocess_dataset_no_split(
+                    X_raw=dataset["X_raw"],
+                    labels=dataset["labels"],
+                    args=args,
+                    seed=seed,
+                    d_star_override=d_star_test,
+                )
+                use_train_only = False
+            
+            # Metadata for tracking
+            if has_deeplearning:
+                n_spikes_train = train_data["n_spikes"]
+                n_spikes_test = dataset["n_spikes"] - train_data["n_spikes"]
+            else:
+                n_spikes_train = train_data["n_spikes"]
+                n_spikes_test = 0
+            
+            dataset_summary = {
                 "dataset_name": dataset["dataset_name"],
                 "seed": seed,
                 "n_spikes_total": dataset["n_spikes"],
-                "n_spikes_train": train_data["n_spikes"],
-                "n_spikes_test": test_data["n_spikes"],
+                "n_spikes_train": n_spikes_train,
+                "n_spikes_test": n_spikes_test,
                 "n_features": dataset["n_features"],
                 "d_star": train_data["d_star"],
                 "true_k": dataset["true_k"],
                 "variance_threshold": args.variance_threshold,
                 "synthetic_duration": args.synthetic_duration,
                 "subset_duration": args.subset_duration,
+                "used_train_test_split": has_deeplearning,
             }
-        )
+            dataset_summaries.append(dataset_summary)
 
-        include_supervised = train_data["labels"] is not None
-        
-        # Step 3: Build grids using TRAINING statistics only (no leakage!)
-        neighbor_vals = _neighbor_candidates(train_data["n_spikes"])
-        
-        dim_grid, skipped_dr_configs = create_dimensionality_grid(
-            d_star=train_data["d_star"],
-            X_reference=train_data["X_pca"],  # Training data only!
-            include_supervised=include_supervised,
-            rng=np.random.default_rng(seed + 17),
-            neighbor_vals=neighbor_vals,
-        )
-        dim_grid = filter_dimensionality_grid(dim_grid, enabled_methods)
-        if not dim_grid:
-            raise ValueError(
-                "No dimensionality-reduction methods left after applying --dr-groups filter."
+            include_supervised = train_data["labels"] is not None
+            
+            # Step 3: Build grids using statistics from the data
+            neighbor_vals = _neighbor_candidates(train_data["n_spikes"])
+            
+            dim_grid, skipped_dr_configs = create_dimensionality_grid(
+                d_star=train_data["d_star"],
+                X_reference=train_data["X_pca"],
+                include_supervised=include_supervised,
+                rng=np.random.default_rng(seed + 17),
+                neighbor_vals=neighbor_vals,
+            )
+            dim_grid = filter_dimensionality_grid(dim_grid, enabled_methods)
+            if not dim_grid:
+                raise ValueError(
+                    "No dimensionality-reduction methods left after applying --dr-groups filter."
+                )
+
+            clustering_grid = create_clustering_grid(
+                dataset["true_k"],
+                train_data["distance_scale"],
+                neighbor_vals,
+                train_data["n_spikes"],
             )
 
-        clustering_grid = create_clustering_grid(
-            dataset["true_k"],
-            train_data["distance_scale"],  # Training statistics only!
-            neighbor_vals,
-            train_data["n_spikes"],
-        )
-
-        # Step 4: Run experiments on TRAINING data only
-        # This prevents test set leakage during hyperparameter search
-        config = {"dimensionality_reduction": dim_grid, "clustering": clustering_grid}
-        train_dataset_info = {
-            "dataset_name": dataset["dataset_name"] + "_train",
-            "X_pca": train_data["X_pca"],
-            "labels": train_data["labels"],
-            "d_star": train_data["d_star"],
-            "n_spikes": train_data["n_spikes"],
-            "dataset_idx": dataset["dataset_idx"],
-            "seed": dataset["seed"],
-            "true_k": dataset["true_k"],
-            "n_features": dataset["n_features"],
-        }
-        
-        # Run actual experiments
-        experiment_results = run_single_pipeline(runner, train_dataset_info, config)
-        all_results.extend(experiment_results)
-        
-        # Document skipped configurations as failures
-        for skipped in skipped_dr_configs:
-            # Only document if the method is in enabled_methods
-            if skipped["method"] not in enabled_methods:
-                continue
-                
-            # Create a failure result for each clustering method
-            for clust_method, clust_params_list in clustering_grid.items():
-                for clust_params in clust_params_list:
-                    failure_result = {
-                        "experiment_idx": -1,  # Marker for skipped configs
-                        "dim_reduction_method": skipped["method"],
-                        "dim_reduction_params": skipped["params"],
-                        "clustering_method": clust_method,
-                        "clustering_params": clust_params,
-                        "success": False,
-                        "error": f"Configuration skipped: {skipped['skip_reason']}",
-                        "dataset_name": train_dataset_info["dataset_name"],
-                        "dataset_idx": dataset["dataset_idx"],
-                        "dataset_seed": dataset["seed"],
-                        "d_star": train_data["d_star"],
-                        "true_k": dataset["true_k"],
-                        "n_spikes": train_data["n_spikes"],
-                        "n_features_raw": dataset["n_features"],
-                        "n_features_preprocessed": train_data["X_pca"].shape[1],
-                        "data_shape": train_data["X_pca"].shape,
-                        "has_ground_truth": train_data["labels"] is not None,
-                    }
-                    all_results.append(failure_result)
+            # Step 4: Run experiments
+            config = {"dimensionality_reduction": dim_grid, "clustering": clustering_grid}
+            dataset_suffix = f"_dstar{train_data['d_star']}" if args.d_star_values else ""
+            split_suffix = "_train" if use_train_only else ""
+            train_dataset_info = {
+                "dataset_name": dataset["dataset_name"] + split_suffix + dataset_suffix,
+                "X_pca": train_data["X_pca"],
+                "labels": train_data["labels"],
+                "d_star": train_data["d_star"],
+                "n_spikes": train_data["n_spikes"],
+                "dataset_idx": dataset["dataset_idx"],
+                "seed": dataset["seed"],
+                "true_k": dataset["true_k"],
+                "n_features": dataset["n_features"],
+            }
+            
+            # Run actual experiments
+            experiment_results = run_single_pipeline(runner, train_dataset_info, config)
+            all_results.extend(experiment_results)
+            
+            # Track performance for this d_star value
+            if args.d_star_values:
+                successful_results = [r for r in experiment_results if r.get("success")]
+                if successful_results:
+                    aris = [r["evaluation"]["adjusted_rand_index"] 
+                           for r in successful_results 
+                           if r.get("evaluation") and "adjusted_rand_index" in r["evaluation"]]
+                    if aris:
+                        mean_ari = float(np.mean(aris))
+                        max_ari = float(np.max(aris))
+                        d_star_performance.append({
+                            "dataset_idx": idx,
+                            "seed": seed,
+                            "d_star": train_data["d_star"],
+                            "mean_ari": mean_ari,
+                            "max_ari": max_ari,
+                            "n_experiments": len(aris),
+                        })
+            
+            # Document skipped configurations as failures
+            for skipped in skipped_dr_configs:
+                # Only document if the method is in enabled_methods
+                if skipped["method"] not in enabled_methods:
+                    continue
+                    
+                # Create a failure result for each clustering method
+                for clust_method, clust_params_list in clustering_grid.items():
+                    for clust_params in clust_params_list:
+                        failure_result = {
+                            "experiment_idx": -1,  # Marker for skipped configs
+                            "dim_reduction_method": skipped["method"],
+                            "dim_reduction_params": skipped["params"],
+                            "clustering_method": clust_method,
+                            "clustering_params": clust_params,
+                            "success": False,
+                            "error": f"Configuration skipped: {skipped['skip_reason']}",
+                            "dataset_name": train_dataset_info["dataset_name"],
+                            "dataset_idx": dataset["dataset_idx"],
+                            "dataset_seed": dataset["seed"],
+                            "d_star": train_data["d_star"],
+                            "true_k": dataset["true_k"],
+                            "n_spikes": train_data["n_spikes"],
+                            "n_features_raw": dataset["n_features"],
+                            "n_features_preprocessed": train_data["X_pca"].shape[1],
+                            "data_shape": train_data["X_pca"].shape,
+                            "has_ground_truth": train_data["labels"] is not None,
+                        }
+                        all_results.append(failure_result)
 
     runner.save_results(filename=args.results_name)
 
@@ -990,6 +1141,44 @@ def main() -> None:
         with open(corr_path, "w", encoding="utf-8") as f:
             json.dump(correlations, f, indent=2)
         print(f"Unsupervised metric correlations stored at: {corr_path}")
+    
+    # Save and print d_star comparison if multiple values were tested
+    if d_star_performance:
+        d_star_path = output_dir / "d_star_comparison.json"
+        with open(d_star_path, "w", encoding="utf-8") as f:
+            json.dump(d_star_performance, f, indent=2)
+        print(f"d_star comparison results stored at: {d_star_path}")
+        
+        # Analyze and print best d_star
+        print("\n=== d_star Performance Comparison ===")
+        d_star_df = pd.DataFrame(d_star_performance)
+        
+        # Group by d_star and compute average performance
+        d_star_summary = d_star_df.groupby("d_star").agg({
+            "mean_ari": ["mean", "std"],
+            "max_ari": ["mean", "std"],
+            "n_experiments": "sum"
+        }).round(4)
+        
+        print("\nAverage performance across all datasets by d_star:")
+        print(d_star_summary)
+        
+        # Find best d_star
+        best_mean_ari = d_star_df.groupby("d_star")["mean_ari"].mean()
+        best_d_star = int(best_mean_ari.idxmax())
+        best_ari_value = best_mean_ari.max()
+        
+        print(f"\n*** BEST d_star: {best_d_star} (average ARI: {best_ari_value:.4f}) ***")
+        
+        # Per-dataset best d_star
+        print("\nBest d_star per dataset:")
+        for dataset_idx in d_star_df["dataset_idx"].unique():
+            dataset_perf = d_star_df[d_star_df["dataset_idx"] == dataset_idx]
+            best_for_dataset = dataset_perf.loc[dataset_perf["mean_ari"].idxmax()]
+            print(f"  Dataset {dataset_idx} (seed={int(best_for_dataset['seed'])}): "
+                  f"d_star={int(best_for_dataset['d_star'])} "
+                  f"(mean ARI={best_for_dataset['mean_ari']:.4f}, "
+                  f"max ARI={best_for_dataset['max_ari']:.4f})")
 
     print("\n=== DR + Clustering Comparison Complete ===")
 
