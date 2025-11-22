@@ -185,15 +185,19 @@ class ExperimentRunner:
                     continue
                 dim_combos.append((dim_method, dim_params))
         embeddings_cache: Dict[str, Dict[str, Any]] = {}
+        failed_dr_configs: List[Tuple[str, Dict[str, Any], str]] = []  # (method, params, error)
+        
         for dim_method, dim_params in dim_combos:
             key = f"{dim_method}:{_json.dumps(dim_params, sort_keys=True)}"
             if key in embeddings_cache:
                 continue
             reducer = create_reducer(dim_method, **dim_params)
             if reducer is None:
+                failed_dr_configs.append((dim_method, dim_params, f"Failed to create reducer: {dim_method}"))
                 continue
             X_reduced = reducer.fit_transform(X, y)
             if X_reduced is None:
+                failed_dr_configs.append((dim_method, dim_params, "Dimensionality reduction failed (returned None)"))
                 continue
             
             # Cache test_indices for deep learning methods (to handle train/test splits)
@@ -223,9 +227,31 @@ class ExperimentRunner:
                     })
                     experiment_idx += 1
         
+        # Create failure results for DR methods that failed
+        failed_results = []
+        for failed_method, failed_params, error_msg in failed_dr_configs:
+            for clust_method, clust_params_list in config.get('clustering', {}).items():
+                for clust_params in clust_params_list:
+                    failed_results.append({
+                        'experiment_idx': experiment_idx,
+                        'dim_reduction_method': failed_method,
+                        'dim_reduction_params': failed_params,
+                        'clustering_method': clust_method,
+                        'clustering_params': clust_params,
+                        'timestamp': datetime.now().isoformat(),
+                        'success': False,
+                        'error': error_msg,
+                        'dataset_name': dataset_name,
+                        'data_shape': X.shape,
+                        'has_ground_truth': y is not None
+                    })
+                    experiment_idx += 1
+        
         if self.verbose:
             print(f"\n{'='*70}")
             print(f"Running {len(experiments)} experiments on dataset: {dataset_name}")
+            if failed_results:
+                print(f"(Note: {len(failed_results)} additional experiments failed during DR and will be recorded)")
             print(f"Data shape: {X.shape}")
             print(f"Experiment ID: {self.experiment_id}")
             print(f"{'='*70}\n")
@@ -314,6 +340,11 @@ class ExperimentRunner:
             for result in results:
                 self._save_intermediate_result(result, dataset_name)
         
+        # Add failed DR results to the results list
+        for failed_result in failed_results:
+            self._save_intermediate_result(failed_result, dataset_name)
+        results.extend(failed_results)
+        
         # Add dataset metadata
         for result in results:
             result['dataset_name'] = dataset_name
@@ -350,14 +381,16 @@ class ExperimentRunner:
         """Print summary of experiment results."""
         n_total = len(results)
         n_success = sum(1 for r in results if r['success'])
-        n_failed = n_total - n_success
+        n_skipped = sum(1 for r in results if not r['success'] and 'Configuration skipped' in r.get('error', ''))
+        n_failed = n_total - n_success - n_skipped
         
         print(f"\n{'='*70}")
         print(f"Experiment Summary")
         print(f"{'='*70}")
         print(f"Total experiments: {n_total}")
         print(f"Successful: {n_success} ({n_success/n_total*100:.1f}%)")
-        print(f"Failed: {n_failed} ({n_failed/n_total*100:.1f}%)")
+        print(f"Skipped (constraint violations): {n_skipped} ({n_skipped/n_total*100:.1f}%)")
+        print(f"Failed (errors): {n_failed} ({n_failed/n_total*100:.1f}%)")
         
         if n_success > 0:
             # Find best performing experiments

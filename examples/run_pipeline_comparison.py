@@ -28,7 +28,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
@@ -304,9 +304,15 @@ def create_dimensionality_grid(
     include_supervised: bool,
     rng: np.random.Generator,
     neighbor_vals: Optional[List[int]] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
-    """Build DR hyperparameter grids tied to heuristics described in the design doc."""
+) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    """Build DR hyperparameter grids tied to heuristics described in the design doc.
+    
+    Returns:
+        Tuple of (config_dict, skipped_configs_list) where skipped_configs_list contains
+        configurations that were filtered out due to constraints.
+    """
     config: Dict[str, List[Dict[str, Any]]] = {}
+    skipped_configs: List[Dict[str, Any]] = []
     component_options = _component_options(d_star)
     n_samples = X_reference.shape[0]
 
@@ -338,14 +344,36 @@ def create_dimensionality_grid(
         params: List[Dict[str, Any]] = []
         for n_nb in neighbor_vals:
             for comp in manifold_dims:
-                # ModifiedLLE requires n_neighbors >= n_components
-                if method == "ModifiedLLE" and n_nb < comp:
-                    continue
+                skip_reason = None
+                
+                # DiffusionMaps: cap n_components at 5 to avoid ARPACK convergence issues
+                if method == "DiffusionMaps" and comp > 5:
+                    skip_reason = f"DiffusionMaps n_components > 5 (requested {comp})"
+                # ModifiedLLE requires n_neighbors > n_components
+                elif method == "ModifiedLLE" and n_nb <= comp:
+                    skip_reason = f"ModifiedLLE requires n_neighbors > n_components (n_neighbors={n_nb}, n_components={comp})"
                 # Ensure n_neighbors < n_samples for all graph-based methods
-                if n_nb >= n_samples:
-                    continue
+                elif n_nb >= n_samples:
+                    skip_reason = f"n_neighbors >= n_samples ({n_nb} >= {n_samples})"
                 # Ensure n_components < n_samples
-                if comp >= n_samples:
+                elif comp >= n_samples:
+                    skip_reason = f"n_components >= n_samples ({comp} >= {n_samples})"
+                
+                if skip_reason:
+                    entry = {"n_neighbors": n_nb, "n_components": comp}
+                    if method == "DiffusionMaps":
+                        for alpha in (0.5, 1.0):
+                            skipped_configs.append({
+                                "method": method,
+                                "params": {**entry, "alpha": alpha},
+                                "skip_reason": skip_reason
+                            })
+                    else:
+                        skipped_configs.append({
+                            "method": method,
+                            "params": entry,
+                            "skip_reason": skip_reason
+                        })
                     continue
                     
                 entry = {"n_neighbors": n_nb, "n_components": comp}
@@ -481,7 +509,7 @@ def create_dimensionality_grid(
             for temp in (0.5, 1.0)
         ]
 
-    return config
+    return config, skipped_configs
 
 
 def create_clustering_grid(
@@ -522,19 +550,107 @@ def create_clustering_grid(
     }
 
 
+def split_and_preprocess_dataset(
+    X_raw: np.ndarray,
+    labels: np.ndarray,
+    args: argparse.Namespace,
+    seed: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Split data and fit PCA on training set only to avoid leakage.
+    
+    This function ensures proper train/test isolation:
+    1. Splits data using stratified sampling
+    2. Fits PCA and computes d_star on TRAINING set only
+    3. Transforms both train and test using training-fit PCA
+    4. Computes hyperparameter statistics on TRAINING set only
+    
+    Args:
+        X_raw: Raw spike features (n_samples, n_features)
+        labels: Ground truth labels
+        args: Argument namespace with configuration
+        seed: Random seed for reproducibility
+        
+    Returns:
+        train_data: Dict with X_train, X_pca_train, labels_train, d_star, etc.
+        test_data: Dict with X_test, X_pca_test, labels_test
+    """
+    from sklearn.model_selection import train_test_split
+    
+    # Stratified train/test split (default 80/20)
+    test_size = 0.2
+    train_idx, test_idx = train_test_split(
+        np.arange(len(X_raw)),
+        test_size=test_size,
+        stratify=labels,
+        random_state=seed
+    )
+    
+    X_train = X_raw[train_idx]
+    X_test = X_raw[test_idx]
+    y_train = labels[train_idx]
+    y_test = labels[test_idx]
+    
+    # Fit PCA on TRAINING set only
+    pca_rng = np.random.default_rng(seed + 73)
+    pca_result = determine_intrinsic_pca_dim(
+        X_train,  # Only training data!
+        variance_threshold=args.variance_threshold,
+        component_cap=args.max_pca_components,
+        fit_cap=args.max_pca_fit,
+        train_fraction=1.0,  # Use all training data (already split)
+        rng=pca_rng,
+    )
+    
+    pca_model = pca_result['pca_model']
+    d_star = pca_result['d_star']
+    
+    # Transform train and test using training-fit PCA
+    X_pca_train = pca_model.transform(X_train)[:, :d_star]
+    X_pca_test = pca_model.transform(X_test)[:, :d_star]
+    
+    # Compute hyperparameter statistics on TRAINING set only
+    distance_scale = _estimate_distance_scale(X_pca_train, rng=np.random.default_rng(seed + 19))
+    
+    train_data = {
+        'X_raw': X_train,
+        'X_pca': X_pca_train,
+        'labels': y_train,
+        'n_spikes': len(X_train),
+        'd_star': d_star,
+        'distance_scale': distance_scale,
+        'pca_model': pca_model,
+        'cumulative_variance': pca_result['cumulative_variance'],
+    }
+    
+    test_data = {
+        'X_raw': X_test,
+        'X_pca': X_pca_test,
+        'labels': y_test,
+        'n_spikes': len(X_test),
+        'indices': test_idx,  # Track which samples are in test set
+    }
+    
+    print(f"   Train/Test split: {len(X_train)} train, {len(X_test)} test")
+    print(f"   d* computed on training set: {d_star}")
+    print(f"   PCA variance explained: {pca_result['cumulative_variance'][d_star-1]:.1%}")
+    
+    return train_data, test_data
+
+
 def prepare_dataset(
     dataset_idx: int,
     seed: int,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    """Generate synthetic recording and prepare PCA-preprocessed features.
+    """Generate synthetic recording and extract raw spike features.
+    
+    IMPORTANT: No PCA preprocessing is done here to avoid data leakage!
+    PCA will be fit on the training set only after train/test split.
     
     Returns a dataset dict containing:
-        - X_raw: Raw spike features (for reference/distance estimation)
-        - X_pca: PCA-preprocessed features (main input to DR methods)
+        - X_raw: Raw spike features (NOT preprocessed yet)
         - labels: Ground-truth spike labels
-        - d_star: Intrinsic dimensionality (PCA components retained)
-        - Metadata: Dataset name, seed, true_k, distance_scale, etc.
+        - Metadata: Dataset name, seed, true_k, etc.
     """
     static_rec, _, gt_sorting = create_synthetic_recording(
         num_units=args.num_units,
@@ -555,16 +671,7 @@ def prepare_dataset(
         raise RuntimeError("No spikes matched to ground truth; consider lowering detection threshold.")
     X_raw = X_raw[matched_mask]
     labels = labels_full[matched_mask]
-    pca_rng = np.random.default_rng(seed + 73)
-    metadata = determine_intrinsic_pca_dim(
-        X_raw,
-        variance_threshold=args.variance_threshold,
-        component_cap=args.max_pca_components,
-        fit_cap=args.max_pca_fit,
-        train_fraction=args.pca_train_fraction,
-        rng=pca_rng,
-    )
-    distance_scale = _estimate_distance_scale(X_raw, rng=np.random.default_rng(seed + 19))
+    
     dataset_name = f"synthetic_seed{seed}_idx{dataset_idx}"
     return {
         "dataset_idx": dataset_idx,
@@ -576,8 +683,6 @@ def prepare_dataset(
         "n_features": int(X_raw.shape[1]),
         "true_k": int(len(np.unique(labels))),
         "preprocess_meta": preprocess_meta,
-        "distance_scale": distance_scale,
-        **metadata,
     }
 
 
@@ -754,15 +859,29 @@ def main() -> None:
 
     for idx, seed in enumerate(seeds):
         print(f"\n=== Dataset {idx + 1}/{len(seeds)} (seed={seed}) ===")
+        
+        # Step 1: Prepare raw dataset (NO PCA yet to avoid leakage)
         dataset = prepare_dataset(idx, seed, args)
-        dataset["variance_threshold"] = args.variance_threshold
+        
+        # Step 2: Train/test split BEFORE any preprocessing
+        print(f"   Splitting data to avoid leakage...")
+        train_data, test_data = split_and_preprocess_dataset(
+            X_raw=dataset["X_raw"],
+            labels=dataset["labels"],
+            args=args,
+            seed=seed,
+        )
+        
+        # Metadata for tracking
         dataset_summaries.append(
             {
                 "dataset_name": dataset["dataset_name"],
                 "seed": seed,
-                "n_spikes": dataset["n_spikes"],
+                "n_spikes_total": dataset["n_spikes"],
+                "n_spikes_train": train_data["n_spikes"],
+                "n_spikes_test": test_data["n_spikes"],
                 "n_features": dataset["n_features"],
-                "d_star": dataset["d_star"],
+                "d_star": train_data["d_star"],
                 "true_k": dataset["true_k"],
                 "variance_threshold": args.variance_threshold,
                 "synthetic_duration": args.synthetic_duration,
@@ -770,13 +889,14 @@ def main() -> None:
             }
         )
 
-        include_supervised = dataset["labels"] is not None  # enables CEED only when GT labels exist
-        neighbor_vals = _neighbor_candidates(dataset["n_spikes"])
+        include_supervised = train_data["labels"] is not None
         
-        # Build DR grid using PCA-preprocessed features as reference
-        dim_grid = create_dimensionality_grid(
-            d_star=dataset["d_star"],
-            X_reference=dataset["X_pca"],
+        # Step 3: Build grids using TRAINING statistics only (no leakage!)
+        neighbor_vals = _neighbor_candidates(train_data["n_spikes"])
+        
+        dim_grid, skipped_dr_configs = create_dimensionality_grid(
+            d_star=train_data["d_star"],
+            X_reference=train_data["X_pca"],  # Training data only!
             include_supervised=include_supervised,
             rng=np.random.default_rng(seed + 17),
             neighbor_vals=neighbor_vals,
@@ -789,14 +909,59 @@ def main() -> None:
 
         clustering_grid = create_clustering_grid(
             dataset["true_k"],
-            dataset["distance_scale"],
+            train_data["distance_scale"],  # Training statistics only!
             neighbor_vals,
-            dataset["n_spikes"],
+            train_data["n_spikes"],
         )
 
-        # Run single pipeline on PCA-preprocessed features
+        # Step 4: Run experiments on TRAINING data only
+        # This prevents test set leakage during hyperparameter search
         config = {"dimensionality_reduction": dim_grid, "clustering": clustering_grid}
-        all_results.extend(run_single_pipeline(runner, dataset, config))
+        train_dataset_info = {
+            "dataset_name": dataset["dataset_name"] + "_train",
+            "X_pca": train_data["X_pca"],
+            "labels": train_data["labels"],
+            "d_star": train_data["d_star"],
+            "n_spikes": train_data["n_spikes"],
+            "dataset_idx": dataset["dataset_idx"],
+            "seed": dataset["seed"],
+            "true_k": dataset["true_k"],
+            "n_features": dataset["n_features"],
+        }
+        
+        # Run actual experiments
+        experiment_results = run_single_pipeline(runner, train_dataset_info, config)
+        all_results.extend(experiment_results)
+        
+        # Document skipped configurations as failures
+        for skipped in skipped_dr_configs:
+            # Only document if the method is in enabled_methods
+            if skipped["method"] not in enabled_methods:
+                continue
+                
+            # Create a failure result for each clustering method
+            for clust_method, clust_params_list in clustering_grid.items():
+                for clust_params in clust_params_list:
+                    failure_result = {
+                        "experiment_idx": -1,  # Marker for skipped configs
+                        "dim_reduction_method": skipped["method"],
+                        "dim_reduction_params": skipped["params"],
+                        "clustering_method": clust_method,
+                        "clustering_params": clust_params,
+                        "success": False,
+                        "error": f"Configuration skipped: {skipped['skip_reason']}",
+                        "dataset_name": train_dataset_info["dataset_name"],
+                        "dataset_idx": dataset["dataset_idx"],
+                        "dataset_seed": dataset["seed"],
+                        "d_star": train_data["d_star"],
+                        "true_k": dataset["true_k"],
+                        "n_spikes": train_data["n_spikes"],
+                        "n_features_raw": dataset["n_features"],
+                        "n_features_preprocessed": train_data["X_pca"].shape[1],
+                        "data_shape": train_data["X_pca"].shape,
+                        "has_ground_truth": train_data["labels"] is not None,
+                    }
+                    all_results.append(failure_result)
 
     runner.save_results(filename=args.results_name)
 

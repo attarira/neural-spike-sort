@@ -286,6 +286,7 @@ class ModifiedLLEReducer(DimensionalityReductionBase):
             def _fit():
                 params = self.params.copy()
                 params['method'] = 'modified'
+                params["eigen_solver"] = "dense"
                 self.model = LocallyLinearEmbedding(**params)
                 return self.model.fit_transform(X)
             
@@ -323,7 +324,8 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                 # Try using pydiffmap if available, otherwise use a custom implementation
                 try:
                     from pydiffmap import diffusion_map as dm
-                    n_components = self.params.get('n_components', 10)
+                    # Cap n_components at 5 to avoid convergence issues
+                    n_components = min(self.params.get('n_components', 10), 5)
                     epsilon = self.params.get('epsilon', 'bgh')
                     alpha = self.params.get('alpha', 0.5)
                     
@@ -337,7 +339,7 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                 except ImportError:
                     # Fallback: use Laplacian Eigenmaps as approximation with robust parameters
                     n_samples = X.shape[0]
-                    n_components = min(self.params.get('n_components', 10), n_samples - 2)
+                    n_components = min(self.params.get('n_components', 10), n_samples - 2, 5)  # Cap at 5
                     n_neighbors = min(self.params.get('n_neighbors', 10), n_samples - 1)
                     
                     # Ensure n_components is valid
@@ -345,8 +347,8 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                         print(f"Warning: Too few samples ({n_samples}) for DiffusionMaps, need at least 3")
                         return None
                     
-                    # Use dense solver for small datasets to avoid ARPACK convergence issues
-                    eigen_solver = 'dense' if n_samples < 500 else 'arpack'
+                    # Use dense solver for N <= 1000 to avoid ARPACK convergence issues
+                    eigen_solver = 'dense' if n_samples <= 1000 else 'arpack'
                     
                     params = {
                         'n_components': n_components,
