@@ -463,7 +463,7 @@ def create_dimensionality_grid(
         umap_neighbors = [umap_neighbors[0], umap_neighbors[len(umap_neighbors) // 2], umap_neighbors[-1]]
     if not umap_neighbors:
         umap_neighbors = [min(10, max(2, n_samples - 1))]
-    umap_dims = sorted({2, max(2, min(3, d_star)), max(2, int(d_star))})
+    umap_dims = sorted({2, max(2, int(d_star / 2)), max(2, min(3, d_star)), max(2, int(d_star))})
     # Ensure n_components < n_samples for UMAP
     umap_dims = [d for d in umap_dims if d < n_samples]
     if umap_dims:
@@ -483,7 +483,7 @@ def create_dimensionality_grid(
         config["UMAP"] = []
 
     # --- Density-preserving global methods ---------------------------------
-    phate_dims = [d for d in (2, max(2, int(d_star))) if d < n_samples]
+    phate_dims = [d for d in (2, max(2, int(d_star / 2)), max(2, int(d_star))) if d < n_samples]
     if phate_dims:
         config["PHATE"] = [
             {
@@ -498,7 +498,7 @@ def create_dimensionality_grid(
     else:
         config["PHATE"] = []
 
-    trimap_dims = [d for d in (2, max(2, int(d_star))) if d < n_samples]
+    trimap_dims = [d for d in (2, max(2, int(d_star / 2)), max(2, int(d_star))) if d < n_samples]
     if trimap_dims:
         config["TriMap"] = [
             {
