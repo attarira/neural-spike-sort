@@ -40,6 +40,7 @@ from spike_sort.utils.runner_helpers import (
     match_ground_truth,
     prepare_spike_features,
     slice_recording,
+    visualize_best_clusters,
 )
 
 # Mapping from high-level DR groups requested by the user to the concrete reducer names
@@ -50,6 +51,7 @@ DR_GROUPS: Dict[str, Set[str]] = {
     "nonlinear": {
         "KPCA",
         "Isomap",
+        "MDS",
         "LLE",
         "ModifiedLLE",
         "LaplacianEigenmaps",
@@ -158,6 +160,23 @@ def parse_args() -> argparse.Namespace:
             "If provided, tests each value and reports the best. "
             "If not provided, uses auto-computed d_star from variance threshold."
         ),
+    )
+    parser.add_argument(
+        "--apply-ibl-pipeline",
+        action="store_true",
+        help="Apply IBL preprocessing pipeline (bandpass filter, spatial filtering, etc.)",
+    )
+    parser.add_argument(
+        "--correct-motion",
+        action="store_true",
+        help="Apply motion correction (requires --apply-ibl-pipeline)",
+    )
+    parser.add_argument(
+        "--motion-preset",
+        type=str,
+        default="dredge",
+        choices=["dredge", "kilosort_like", "nonrigid_accurate", "rigid_fast"],
+        help="Motion correction preset to use (default: dredge)",
     )
     return parser.parse_args()
 
@@ -346,6 +365,23 @@ def create_dimensionality_grid(
             "fit_inverse_transform": False,
         }
     ]
+    
+    # --- MDS (distance-preserving embedding) --------------------------------
+    mds_dims = _manifold_components(d_star)
+    mds_dims = [d for d in mds_dims if d < n_samples]
+    if mds_dims:
+        config["MDS"] = [
+            {
+                "n_components": comp,
+                "metric": True,
+                "n_init": 4,
+                "max_iter": 300,
+                "random_state": 42,
+            }
+            for comp in mds_dims
+        ]
+    else:
+        config["MDS"] = []
 
     # --- Graph / manifold learners -----------------------------------------
     manifold_dims = _manifold_components(d_star)
@@ -755,7 +791,18 @@ def prepare_dataset(
         sf=static_rec.get_sampling_frequency(),
         gt_sorting=gt_sorting,
     )
-    X_raw, peak_locations, preprocess_meta = prepare_spike_features(recording, threshold=args.detect_threshold)
+    X_raw, peak_locations, preprocess_meta = prepare_spike_features(
+        recording, 
+        threshold=args.detect_threshold,
+        synthetic_pipeline=True,  # Using synthetic data preprocessing
+        apply_ibl_pipeline=args.apply_ibl_pipeline,
+        correct_motion=args.correct_motion,
+        motion_preset=args.motion_preset,
+        cache_dir=str(Path(args.output_dir) / "preprocessing_cache") if args.apply_ibl_pipeline else None,
+        save_motion=args.correct_motion,  # Save motion data if correction is applied
+        save_rec=False,  # Don't save intermediate recordings by default
+        job_kwargs={"n_jobs": args.n_jobs} if args.n_jobs > 1 else None,
+    )
     labels_full = match_ground_truth(gt_crop, peak_locations, recording)
     matched_mask = labels_full >= 0  # keep only spikes that found a GT match
     if not np.any(matched_mask):
@@ -811,6 +858,12 @@ def run_single_pipeline(
         result["n_spikes"] = dataset["n_spikes"]
         result["n_features_raw"] = dataset["n_features"]
         result["n_features_preprocessed"] = dataset["X_pca"].shape[1]
+        
+        # Add string versions of params for compatibility with visualization
+        if "dim_reduction_params" in result:
+            result["dim_params_str"] = json.dumps(result["dim_reduction_params"])
+        if "clustering_params" in result:
+            result["clust_params_str"] = json.dumps(result["clustering_params"])
     return results
 
 
@@ -916,6 +969,68 @@ def select_best_configs(df: pd.DataFrame) -> pd.DataFrame:
     return best
 
 
+def analyze_method_performance(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Analyze performance by method pair using both peak and average metrics.
+    
+    Creates two views:
+    1. Peak performance: Best single result for each (DR, clustering) pair
+    2. Average performance: Mean performance across all configurations for each pair
+    
+    Args:
+        df: Results DataFrame with columns for metrics and parameters
+        
+    Returns:
+        Tuple of (peak_performance_df, average_performance_df)
+    """
+    if df.empty or "ari" not in df:
+        return pd.DataFrame(), pd.DataFrame()
+    
+    metric_df = df.dropna(subset=["ari"]).copy()
+    if metric_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    
+    # Group by method pair (ignoring hyperparameters)
+    method_cols = ["dim_reduction_method", "clustering_method"]
+    
+    # Peak performance: max ARI achieved by any configuration for each method pair
+    peak = metric_df.groupby(method_cols, as_index=False).agg({
+        "ari": ["max", "mean", "std", "count"],
+        "v_measure": ["max", "mean"],
+        "nmi": ["max", "mean"],
+    })
+    
+    # Flatten column names
+    peak.columns = [
+        "dim_reduction_method", "clustering_method",
+        "peak_ari", "mean_ari", "std_ari", "n_configs",
+        "peak_v_measure", "mean_v_measure",
+        "peak_nmi", "mean_nmi"
+    ]
+    
+    # Sort by peak ARI
+    peak = peak.sort_values(by="peak_ari", ascending=False).reset_index(drop=True)
+    
+    # Average performance: mean ARI across all configurations for each method pair
+    avg = metric_df.groupby(method_cols, as_index=False).agg({
+        "ari": ["mean", "std", "min", "max", "count"],
+        "v_measure": ["mean", "std"],
+        "nmi": ["mean", "std"],
+    })
+    
+    # Flatten column names
+    avg.columns = [
+        "dim_reduction_method", "clustering_method",
+        "mean_ari", "std_ari", "min_ari", "max_ari", "n_configs",
+        "mean_v_measure", "std_v_measure",
+        "mean_nmi", "std_nmi"
+    ]
+    
+    # Sort by mean ARI
+    avg = avg.sort_values(by="mean_ari", ascending=False).reset_index(drop=True)
+    
+    return peak, avg
+
+
 def compute_unsupervised_correlations(df: pd.DataFrame) -> Dict[str, float]:
     correlations: Dict[str, float] = {}
     for metric in ("silhouette", "davies_bouldin", "calinski_harabasz"):
@@ -953,6 +1068,10 @@ def main() -> None:
     
     # Track d_star performance if testing multiple values
     d_star_performance: List[Dict[str, Any]] = []
+    
+    # Track last dataset's features and labels for visualization
+    last_X_pca = None
+    last_labels = None
 
     for idx, seed in enumerate(seeds):
         print(f"\n=== Dataset {idx + 1}/{len(seeds)} (seed={seed}) ===")
@@ -1065,6 +1184,10 @@ def main() -> None:
             experiment_results = run_single_pipeline(runner, train_dataset_info, config)
             all_results.extend(experiment_results)
             
+            # Save for visualization (use last dataset processed)
+            last_X_pca = train_data["X_pca"]
+            last_labels = train_data["labels"]
+            
             # Track performance for this d_star value
             if args.d_star_values:
                 successful_results = [r for r in experiment_results if r.get("success")]
@@ -1118,9 +1241,12 @@ def main() -> None:
 
     results_df = build_results_dataframe(all_results)
     best_configs = select_best_configs(results_df)
+    peak_performance, avg_performance = analyze_method_performance(results_df)
     correlations = compute_unsupervised_correlations(results_df)
 
     best_path = output_dir / "best_configs.csv"
+    peak_performance_path = output_dir / "peak_performance.csv"
+    avg_performance_path = output_dir / "average_performance.csv"
     full_results_path = output_dir / "all_results.csv"
     meta_path = output_dir / "dataset_metadata.json"
     corr_path = output_dir / "unsupervised_metric_correlations.json"
@@ -1128,6 +1254,14 @@ def main() -> None:
     if not best_configs.empty:
         best_configs.to_csv(best_path, index=False)
         print(f"\nSaved best configurations (per DR + clustering method) to: {best_path}")
+    
+    if not peak_performance.empty:
+        peak_performance.to_csv(peak_performance_path, index=False)
+        print(f"Saved peak performance analysis to: {peak_performance_path}")
+    
+    if not avg_performance.empty:
+        avg_performance.to_csv(avg_performance_path, index=False)
+        print(f"Saved average performance analysis to: {avg_performance_path}")
     
     if not results_df.empty:
         results_df.to_csv(full_results_path, index=False)
@@ -1180,11 +1314,62 @@ def main() -> None:
                   f"(mean ARI={best_for_dataset['mean_ari']:.4f}, "
                   f"max ARI={best_for_dataset['max_ari']:.4f})")
 
+    # Print performance analysis summaries
+    if not peak_performance.empty:
+        print("\n=== Peak Performance (Best Single Config per Method Pair) ===")
+        print("\nTop 10 method combinations by peak ARI:")
+        top_peak = peak_performance.head(10)[["dim_reduction_method", "clustering_method", 
+                                               "peak_ari", "mean_ari", "std_ari", "n_configs"]]
+        print(top_peak.to_string(index=False))
+    
+    if not avg_performance.empty:
+        print("\n=== Average Performance (Mean Across All Configs per Method Pair) ===")
+        print("\nTop 10 method combinations by average ARI:")
+        top_avg = avg_performance.head(10)[["dim_reduction_method", "clustering_method",
+                                             "mean_ari", "std_ari", "min_ari", "max_ari", "n_configs"]]
+        print(top_avg.to_string(index=False))
+        
+        # Identify most consistent methods (high mean, low std)
+        if len(avg_performance) > 0:
+            avg_performance["consistency_score"] = avg_performance["mean_ari"] / (avg_performance["std_ari"] + 1e-6)
+            most_consistent = avg_performance.nlargest(5, "consistency_score")
+            print("\n=== Most Consistent Methods (High Mean / Low Std) ===")
+            consistent_display = most_consistent[["dim_reduction_method", "clustering_method",
+                                                   "mean_ari", "std_ari", "consistency_score"]]
+            print(consistent_display.to_string(index=False))
+
     print("\n=== DR + Clustering Comparison Complete ===")
 
     analyzer = ResultsAnalyzer(all_results)
     print("\nSummary statistics across all runs:")
     print(analyzer.get_summary_statistics())
+    
+    # Print mean ARI per DR method
+    if not results_df.empty and "ari" in results_df.columns:
+        mean_ari = results_df.groupby("dim_reduction_method")["ari"].mean().sort_values(ascending=False)
+        print("\nBest mean ARI per dimensionality reduction method:")
+        print(mean_ari)
+    
+    # Visualize best clustering configuration (by mean ARI)
+    if last_X_pca is not None and len(all_results) > 0:
+        try:
+            visualize_best_clusters(
+                X=last_X_pca,
+                y=last_labels if last_labels is not None else None,
+                results=all_results,
+                output_dir=output_dir / "visualizations",
+                max_points=50000,
+                plot_3d=True,
+                recording=None,
+                peak_locations=None,
+                export_to_phy_flag=False,
+                launch_phy_gui=False,
+                job_kwargs=None,
+                use_mean_ari=True,  # Use mean ARI across datasets for more robust selection
+            )
+        except Exception as e:
+            import logging
+            logging.warning(f"Visualization failed: {e}")
 
 
 if __name__ == "__main__":

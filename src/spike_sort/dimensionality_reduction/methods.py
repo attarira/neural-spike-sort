@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 from sklearn.decomposition import PCA, FastICA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.manifold import TSNE, Isomap, LocallyLinearEmbedding, SpectralEmbedding
+from sklearn.manifold import TSNE, Isomap, LocallyLinearEmbedding, SpectralEmbedding, MDS
 from sklearn.cross_decomposition import CCA
 import warnings
 
@@ -259,6 +259,22 @@ class LaplacianEigenmapsReducer(DimensionalityReductionBase):
             return self._validate_output(result)
         except Exception as e:
             print(f"Laplacian Eigenmaps failed: {str(e)}")
+            return None
+
+
+class MDSReducer(DimensionalityReductionBase):
+    """Multidimensional Scaling (MDS)."""
+    
+    def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        try:
+            def _fit():
+                self.model = MDS(**self.params)
+                return self.model.fit_transform(X)
+            
+            result, self.computation_time, self.memory_usage = self._track_performance(_fit)
+            return self._validate_output(result)
+        except Exception as e:
+            print(f"MDS failed: {str(e)}")
             return None
 
 
@@ -1151,6 +1167,7 @@ def create_reducer(method_name: str, **params) -> Optional[DimensionalityReducti
         't-SNE': TSNEReducer,
         'UMAP': UMAPReducer,
         'Isomap': IsomapReducer,
+        'MDS': MDSReducer,
         'LaplacianEigenmaps': LaplacianEigenmapsReducer,
         'LLE': LLEReducer,
         'ModifiedLLE': ModifiedLLEReducer,
