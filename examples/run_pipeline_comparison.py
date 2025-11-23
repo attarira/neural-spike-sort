@@ -6,14 +6,15 @@ Workflow
 --------
 1. Generate SpikeInterface drifting recordings (≈20 units, ~1 minute) and extract spike features.
 2. Derive intrinsic PCA dimension d* per dataset using an explained-variance rule (≥98%, cap at 20).
-3. Preprocess features with PCA to d* (whitened, decorrelated representation).
+3. Preprocess features with PCA to d* for nonlinear and deep learning methods.
 4. Evaluate DR methods (PCA, ICA, UMAP, t-SNE, manifold methods, deep learning) with clustering.
 5. Tune (DR, clusterer) configurations on theory-backed grids to maximize ARI.
 6. Report ARI (primary), V-measure, NMI, and optional unsupervised metrics plus correlations.
 
 Rationale
 ---------
-All DR methods receive PCA-preprocessed input because:
+Linear methods (PCA, ICA) receive raw waveforms directly to avoid redundant preprocessing.
+Nonlinear and deep learning methods receive PCA-preprocessed input because:
   - Many manifold learners (Isomap/LLE/UMAP/etc) assume isotropic/whitened spaces
   - Raw waveforms have correlated dimensions with amplitude-dominated variance
   - PCA preprocessing decorrelates features and improves numerical conditioning
@@ -828,29 +829,68 @@ def run_single_pipeline(
     runner: ExperimentRunner,
     dataset: Dict[str, Any],
     config: Dict[str, Any],
+    enabled_methods: Set[str],
 ) -> List[Dict[str, Any]]:
-    """Run experiments on PCA-preprocessed features for a single dataset.
+    """Run experiments with appropriate preprocessing for each method type.
+    
+    Linear methods (PCA, ICA) run on raw waveforms.
+    Nonlinear and deep learning methods run on PCA-preprocessed features.
     
     Args:
         runner: ExperimentRunner instance
-        dataset: Dataset dict containing X_pca, labels, and metadata
+        dataset: Dataset dict containing X_raw, X_pca, labels, and metadata
         config: Combined DR + clustering configuration
+        enabled_methods: Set of enabled DR method names
         
     Returns:
         List of result dictionaries with metadata attached
     """
-    X_preprocessed = dataset["X_pca"]
     dataset_name = dataset["dataset_name"]
+    all_results = []
     
-    results = runner.run_experiments(
-        X=X_preprocessed,
-        config=config,
-        y=dataset["labels"],
-        dataset_name=dataset_name,
-    )
+    # Determine which method groups are enabled
+    linear_methods = enabled_methods & DR_GROUPS["linear"]
+    nonlinear_methods = enabled_methods & DR_GROUPS["nonlinear"]
+    deeplearning_methods = enabled_methods & DR_GROUPS["deeplearning"]
+    
+    # Run linear methods on RAW data (no PCA preprocessing)
+    if linear_methods:
+        linear_config = {
+            "dimensionality_reduction": {
+                k: v for k, v in config["dimensionality_reduction"].items() 
+                if k in linear_methods
+            },
+            "clustering": config["clustering"]
+        }
+        if linear_config["dimensionality_reduction"]:  # Only run if there are configs
+            linear_results = runner.run_experiments(
+                X=dataset["X_raw"],
+                config=linear_config,
+                y=dataset["labels"],
+                dataset_name=dataset_name,
+            )
+            all_results.extend(linear_results)
+    
+    # Run nonlinear + deep learning methods on PCA-preprocessed data
+    if nonlinear_methods or deeplearning_methods:
+        nonlinear_deeplearning_config = {
+            "dimensionality_reduction": {
+                k: v for k, v in config["dimensionality_reduction"].items() 
+                if k in (nonlinear_methods | deeplearning_methods)
+            },
+            "clustering": config["clustering"]
+        }
+        if nonlinear_deeplearning_config["dimensionality_reduction"]:  # Only run if there are configs
+            nonlinear_deeplearning_results = runner.run_experiments(
+                X=dataset["X_pca"],
+                config=nonlinear_deeplearning_config,
+                y=dataset["labels"],
+                dataset_name=dataset_name,
+            )
+            all_results.extend(nonlinear_deeplearning_results)
     
     # Attach dataset metadata to each result
-    for result in results:
+    for result in all_results:
         result["dataset_idx"] = dataset["dataset_idx"]
         result["dataset_seed"] = dataset["seed"]
         result["d_star"] = dataset["d_star"]
@@ -864,7 +904,8 @@ def run_single_pipeline(
             result["dim_params_str"] = json.dumps(result["dim_reduction_params"])
         if "clustering_params" in result:
             result["clust_params_str"] = json.dumps(result["clustering_params"])
-    return results
+    
+    return all_results
 
 
 def build_results_dataframe(results: Sequence[Dict[str, Any]]) -> pd.DataFrame:
@@ -1170,6 +1211,7 @@ def main() -> None:
             split_suffix = "_train" if use_train_only else ""
             train_dataset_info = {
                 "dataset_name": dataset["dataset_name"] + split_suffix + dataset_suffix,
+                "X_raw": train_data["X_raw"],
                 "X_pca": train_data["X_pca"],
                 "labels": train_data["labels"],
                 "d_star": train_data["d_star"],
@@ -1181,12 +1223,19 @@ def main() -> None:
             }
             
             # Run actual experiments
-            experiment_results = run_single_pipeline(runner, train_dataset_info, config)
+            experiment_results = run_single_pipeline(runner, train_dataset_info, config, enabled_methods)
             all_results.extend(experiment_results)
             
             # Save for visualization (use last dataset processed)
-            last_X_pca = train_data["X_pca"]
-            last_labels = train_data["labels"]
+            # For deep learning: combine train and test data for complete visualization
+            if has_deeplearning:
+                # Combine train and test data back together
+                last_X_pca = np.vstack([train_data["X_pca"], test_data["X_pca"]])
+                last_labels = np.concatenate([train_data["labels"], test_data["labels"]])
+            else:
+                # For non-deep learning, we already have all the data
+                last_X_pca = train_data["X_pca"]
+                last_labels = train_data["labels"]
             
             # Track performance for this d_star value
             if args.d_star_values:
@@ -1353,6 +1402,8 @@ def main() -> None:
     # Visualize best clustering configuration (by mean ARI)
     if last_X_pca is not None and len(all_results) > 0:
         try:
+            if has_deeplearning:
+                print(f"\n[Visualization] Using complete dataset (train + test) for visualization: {last_X_pca.shape[0]} samples")
             visualize_best_clusters(
                 X=last_X_pca,
                 y=last_labels if last_labels is not None else None,
