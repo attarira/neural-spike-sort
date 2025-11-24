@@ -8,6 +8,8 @@ scikit-learn>=1.0.0
 
 # Dimensionality Reduction
 umap-learn>=0.5.0
+phate>=1.0.0
+trimap>=1.0.0
 spikeinterface>=0.103.0
 
 # Deep Learning (optional, for Autoencoder/VAE/CEED/LFADS)
@@ -41,5 +43,10 @@ notebook>=6.4.0
 # Optional: For better performance
 numba>=0.54.0
 
-# Optional: For GPU acceleration
-# cupy-cuda11x>=10.0.0  # Uncomment if you have CUDA 11.x
+# Optional: For GPU acceleration (RAPIDS cuML)
+# Install via conda for best results:
+#   conda install -c rapidsai -c nvidia -c conda-forge cuml cupy
+# Or manually specify CUDA version:
+#   pip install cupy-cuda11x  # For CUDA 11.x
+#   pip install cupy-cuda12x  # For CUDA 12.x
+# Then install cuML from conda or use the full RAPIDS stack

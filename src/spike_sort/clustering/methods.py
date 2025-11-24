@@ -76,11 +76,36 @@ class ClusteringBase(ABC):
 
 
 class KMeansClustering(ClusteringBase):
-    """K-Means Clustering."""
+    """K-Means Clustering with GPU acceleration support."""
     
     def fit_predict(self, X: np.ndarray) -> Optional[np.ndarray]:
         try:
+            use_gpu = self.params.pop('use_gpu', False)
+            
             def _fit():
+                # Try GPU-accelerated version first if requested
+                if use_gpu:
+                    try:
+                        from cuml.cluster import KMeans as cuKMeans
+                        import cupy as cp
+                        
+                        # Convert to cupy array
+                        X_gpu = cp.asarray(X, dtype=cp.float32)
+                        
+                        # Map parameters
+                        gpu_params = self.params.copy()
+                        gpu_params['random_state'] = 42
+                        self.model = cuKMeans(**gpu_params)
+                        labels_gpu = self.model.fit_predict(X_gpu)
+                        
+                        # Convert back to numpy
+                        return cp.asnumpy(labels_gpu)
+                    except ImportError:
+                        print("Warning: cuML not available. Falling back to CPU K-Means.")
+                    except Exception as e:
+                        print(f"GPU K-Means failed ({str(e)}), falling back to CPU")
+                
+                # CPU version
                 self.model = KMeans(**self.params, random_state=42)
                 labels = self.model.fit_predict(X)
                 return labels
@@ -115,11 +140,35 @@ class GMMClustering(ClusteringBase):
 
 
 class DBSCANClustering(ClusteringBase):
-    """DBSCAN Clustering."""
+    """DBSCAN Clustering with GPU acceleration support."""
     
     def fit_predict(self, X: np.ndarray) -> Optional[np.ndarray]:
         try:
+            use_gpu = self.params.pop('use_gpu', False)
+            
             def _fit():
+                # Try GPU-accelerated version first if requested
+                if use_gpu:
+                    try:
+                        from cuml.cluster import DBSCAN as cuDBSCAN
+                        import cupy as cp
+                        
+                        # Convert to cupy array
+                        X_gpu = cp.asarray(X, dtype=cp.float32)
+                        
+                        # Map parameters
+                        gpu_params = self.params.copy()
+                        self.model = cuDBSCAN(**gpu_params)
+                        labels_gpu = self.model.fit_predict(X_gpu)
+                        
+                        # Convert back to numpy
+                        return cp.asnumpy(labels_gpu)
+                    except ImportError:
+                        print("Warning: cuML not available. Falling back to CPU DBSCAN.")
+                    except Exception as e:
+                        print(f"GPU DBSCAN failed ({str(e)}), falling back to CPU")
+                
+                # CPU version
                 self.model = DBSCAN(**self.params)
                 labels = self.model.fit_predict(X)
                 return labels

@@ -179,6 +179,11 @@ def parse_args() -> argparse.Namespace:
         choices=["dredge", "kilosort_like", "nonrigid_accurate", "rigid_fast"],
         help="Motion correction preset to use (default: dredge)",
     )
+    parser.add_argument(
+        "--use-gpu",
+        action="store_true",
+        help="Use GPU-accelerated versions of algorithms (requires cuML/cupy installation)",
+    )
     return parser.parse_args()
 
 
@@ -335,8 +340,17 @@ def create_dimensionality_grid(
     include_supervised: bool,
     rng: np.random.Generator,
     neighbor_vals: Optional[List[int]] = None,
+    use_gpu: bool = False,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
     """Build DR hyperparameter grids tied to heuristics described in the design doc.
+    
+    Args:
+        d_star: Target dimensionality from PCA analysis
+        X_reference: Reference data for computing hyperparameters
+        include_supervised: Whether to include supervised methods
+        rng: Random number generator
+        neighbor_vals: Neighbor values for manifold methods
+        use_gpu: Whether to use GPU-accelerated versions (requires cuML)
     
     Returns:
         Tuple of (config_dict, skipped_configs_list) where skipped_configs_list contains
@@ -349,7 +363,7 @@ def create_dimensionality_grid(
 
     # --- Linear methods ----------------------------------------------------
     config["PCA"] = [
-        {"n_components": comp, "svd_solver": "auto", "whiten": False}
+        {"n_components": comp, "svd_solver": "auto", "whiten": False, "use_gpu": use_gpu}
         for comp in component_options
     ]
     config["ICA"] = [
@@ -449,6 +463,7 @@ def create_dimensionality_grid(
                 "learning_rate": "auto",
                 "init": "pca",
                 "n_iter": 1000,
+                "use_gpu": use_gpu,
             }
             for perp in perplexities
             for comp in tsne_dims
@@ -474,6 +489,7 @@ def create_dimensionality_grid(
                 "n_components": comp,
                 "metric": "euclidean",
                 "random_state": 42,
+                "use_gpu": use_gpu,
             }
             for n_nb in umap_neighbors
             for min_dist in (0.0, 0.1, 0.3)
@@ -565,6 +581,7 @@ def create_clustering_grid(
     distance_scale: float,
     spectral_neighbors: Sequence[int],
     n_samples: int,
+    use_gpu: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
     min_distance = max(distance_scale, 1e-3)
     eps_multipliers = (0.6, 0.9, 1.3)
@@ -572,6 +589,7 @@ def create_clustering_grid(
         {
             "eps": float(max(min_distance * mult, 1e-3)),
             "min_samples": max(5, int(np.log(max(n_samples, 2))) + offset),
+            "use_gpu": use_gpu,
         }
         for mult, offset in zip(eps_multipliers, (0, 2, 4))
     ]
@@ -583,8 +601,8 @@ def create_clustering_grid(
 
     return {
         "KMeans": [
-            {"n_clusters": true_k, "n_init": 10, "max_iter": 300, "algorithm": "lloyd"},
-            {"n_clusters": true_k, "n_init": 20, "max_iter": 300, "algorithm": "elkan"},
+            {"n_clusters": true_k, "n_init": 10, "max_iter": 300, "algorithm": "lloyd", "use_gpu": use_gpu},
+            {"n_clusters": true_k, "n_init": 20, "max_iter": 300, "algorithm": "elkan", "use_gpu": use_gpu},
         ],
         "GMM": [
             {"n_components": true_k, "covariance_type": "full", "reg_covar": 1e-4, "max_iter": 300},
@@ -1191,6 +1209,7 @@ def main() -> None:
                 include_supervised=include_supervised,
                 rng=np.random.default_rng(seed + 17),
                 neighbor_vals=neighbor_vals,
+                use_gpu=args.use_gpu,
             )
             dim_grid = filter_dimensionality_grid(dim_grid, enabled_methods)
             if not dim_grid:
@@ -1203,6 +1222,7 @@ def main() -> None:
                 train_data["distance_scale"],
                 neighbor_vals,
                 train_data["n_spikes"],
+                use_gpu=args.use_gpu,
             )
 
             # Step 4: Run experiments

@@ -112,11 +112,35 @@ class DimensionalityReductionBase(ABC):
 
 
 class PCAReducer(DimensionalityReductionBase):
-    """Principal Component Analysis."""
+    """Principal Component Analysis with GPU acceleration support."""
     
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         try:
+            use_gpu = self.params.pop('use_gpu', False)
+            
             def _fit():
+                # Try GPU-accelerated version first if requested
+                if use_gpu:
+                    try:
+                        from cuml.decomposition import PCA as cuPCA
+                        import cupy as cp
+                        
+                        # Convert to cupy array
+                        X_gpu = cp.asarray(X, dtype=cp.float32)
+                        
+                        # Map parameters
+                        gpu_params = self.params.copy()
+                        self.model = cuPCA(**gpu_params)
+                        result = self.model.fit_transform(X_gpu)
+                        
+                        # Convert back to numpy
+                        return cp.asnumpy(result)
+                    except ImportError:
+                        print("Warning: cuML not available. Falling back to CPU PCA.")
+                    except Exception as e:
+                        print(f"GPU PCA failed ({str(e)}), falling back to CPU")
+                
+                # CPU version
                 self.model = PCA(**self.params)
                 return self.model.fit_transform(X)
             
@@ -194,11 +218,36 @@ class ICAReducer(DimensionalityReductionBase):
 
 
 class TSNEReducer(DimensionalityReductionBase):
-    """t-Distributed Stochastic Neighbor Embedding."""
+    """t-Distributed Stochastic Neighbor Embedding with GPU acceleration support."""
     
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         try:
+            use_gpu = self.params.pop('use_gpu', False)
+            
             def _fit():
+                # Try GPU-accelerated version first if requested
+                if use_gpu:
+                    try:
+                        from cuml.manifold import TSNE as cuTSNE
+                        import cupy as cp
+                        
+                        # Convert to cupy array
+                        X_gpu = cp.asarray(X, dtype=cp.float32)
+                        
+                        # Map parameters (cuML may have different param names)
+                        gpu_params = self.params.copy()
+                        self.model = cuTSNE(**gpu_params)
+                        result = self.model.fit_transform(X_gpu)
+                        
+                        # Convert back to numpy
+                        return cp.asnumpy(result)
+                    except ImportError:
+                        print("Warning: cuML not available. Falling back to CPU t-SNE.")
+                        print("For GPU acceleration, install: conda install -c rapidsai -c nvidia cuml")
+                    except Exception as e:
+                        print(f"GPU t-SNE failed ({str(e)}), falling back to CPU")
+                
+                # CPU version
                 self.model = TSNE(**self.params)
                 return self.model.fit_transform(X)
             
@@ -210,13 +259,37 @@ class TSNEReducer(DimensionalityReductionBase):
 
 
 class UMAPReducer(DimensionalityReductionBase):
-    """Uniform Manifold Approximation and Projection."""
+    """Uniform Manifold Approximation and Projection with GPU acceleration support."""
     
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         try:
-            import umap
+            use_gpu = self.params.pop('use_gpu', False)
             
             def _fit():
+                # Try GPU-accelerated version first if requested
+                if use_gpu:
+                    try:
+                        from cuml.manifold import UMAP as cuUMAP
+                        import cupy as cp
+                        
+                        # Convert to cupy array
+                        X_gpu = cp.asarray(X, dtype=cp.float32)
+                        
+                        # Map parameters
+                        gpu_params = self.params.copy()
+                        self.model = cuUMAP(**gpu_params)
+                        result = self.model.fit_transform(X_gpu)
+                        
+                        # Convert back to numpy
+                        return cp.asnumpy(result)
+                    except ImportError:
+                        print("Warning: cuML not available. Falling back to CPU UMAP.")
+                        print("For GPU acceleration, install: conda install -c rapidsai -c nvidia cuml")
+                    except Exception as e:
+                        print(f"GPU UMAP failed ({str(e)}), falling back to CPU")
+                
+                # CPU version
+                import umap
                 self.model = umap.UMAP(**self.params)
                 return self.model.fit_transform(X)
             
