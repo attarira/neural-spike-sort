@@ -363,24 +363,20 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                         print(f"Warning: Too few samples ({n_samples}) for DiffusionMaps, need at least 3")
                         return None
                     
-                    # Use dense solver for N <= 1000 to avoid ARPACK convergence issues
-                    eigen_solver = 'dense' if n_samples <= 1000 else 'arpack'
-                    
                     params = {
                         'n_components': n_components,
                         'n_neighbors': n_neighbors,
-                        'affinity': 'rbf',
-                        'eigen_solver': eigen_solver,
-                        'n_jobs': 1,
+                        'affinity': 'nearest_neighbors',
+                        'eigen_solver': 'lobpcg',
+                        'random_state': 42,
                     }
-                    
-                    # Add ARPACK-specific parameters for larger datasets
-                    if eigen_solver == 'arpack':
-                        params['eigen_tol'] = 1e-4
-                        params['max_iter'] = 2000
-                    
-                    self.model = SpectralEmbedding(**params)
-                    return self.model.fit_transform(X)
+                    try:
+                        self.model = SpectralEmbedding(**params)
+                        return self.model.fit_transform(X)
+                    except Exception:
+                        params['eigen_solver'] = 'arpack'
+                        self.model = SpectralEmbedding(**params)
+                        return self.model.fit_transform(X)
             
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
             return self._validate_output(result)

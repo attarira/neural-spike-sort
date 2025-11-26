@@ -1,26 +1,13 @@
 #!/usr/bin/env python3
 """
-Compare dimensionality reduction + clustering combinations on synthetic spike data.
+Enhanced spike sorting pipeline comparison with improved logging and visualizations.
 
-Workflow
---------
-1. Generate SpikeInterface drifting recordings (≈20 units, ~1 minute) and extract spike features.
-2. Derive intrinsic PCA dimension d* per dataset using an explained-variance rule (≥98%, cap at 20).
-3. Preprocess features with PCA to d* for nonlinear and deep learning methods.
-4. Evaluate DR methods (PCA, ICA, UMAP, t-SNE, manifold methods, deep learning) with clustering.
-5. Tune (DR, clusterer) configurations on theory-backed grids to maximize ARI.
-6. Report ARI (primary), V-measure, NMI, and optional unsupervised metrics plus correlations.
-
-Rationale
----------
-Linear methods (PCA, ICA) receive raw waveforms directly to avoid redundant preprocessing.
-Nonlinear and deep learning methods receive PCA-preprocessed input because:
-  - Many manifold learners (Isomap/LLE/UMAP/etc) assume isotropic/whitened spaces
-  - Raw waveforms have correlated dimensions with amplitude-dominated variance
-  - PCA preprocessing decorrelates features and improves numerical conditioning
-
-Run:
-    python examples/run_pipeline_comparison.py --num-datasets 2 --output-dir ./results/pipeline_cmp
+Key improvements:
+- Better structured console output with progress indicators
+- Rich visualization suite including performance metrics, timing, and distance matrices
+- 2D-only cluster plots (removed 3D)
+- Block diagonal distance matrix visualization
+- Performance comparison bar charts
 """
 
 from __future__ import annotations
@@ -28,42 +15,77 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
+from sklearn.model_selection import train_test_split
+
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from spike_sort import ExperimentRunner, ResultsAnalyzer
+from spike_sort.dimensionality_reduction import create_reducer
+from spike_sort.clustering import create_clustering
 from spike_sort.utils.runner_helpers import (
     create_synthetic_recording,
     match_ground_truth,
     prepare_spike_features,
     slice_recording,
-    visualize_best_clusters,
 )
 
-# Mapping from high-level DR groups requested by the user to the concrete reducer names
-# exposed by `create_reducer`. These groupings power the CLI switches that limit runs to
-# linear, nonlinear, or deep-learning methods only.
+# Configure matplotlib
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
+
+# Mapping from high-level DR groups to concrete reducer names
 DR_GROUPS: Dict[str, Set[str]] = {
     "linear": {"PCA", "ICA"},
     "nonlinear": {
-        "KPCA",
-        "Isomap",
-        "MDS",
-        "LLE",
-        "ModifiedLLE",
-        "LaplacianEigenmaps",
-        "DiffusionMaps",
-        "PHATE",
-        "TriMap",
-        "TSNE",
-        "UMAP",
+        "KPCA", "Isomap", "MDS", "LLE", "ModifiedLLE",
+        "LaplacianEigenmaps", "DiffusionMaps", "PHATE", "TriMap", "TSNE", "UMAP",
     },
     "deeplearning": {"Autoencoder", "VAE", "CEED"},
 }
+
+
+def print_header(text: str, level: int = 1) -> None:
+    """Print formatted section headers."""
+    if level == 1:
+        print(f"\n{'=' * 80}")
+        print(f"  {text}")
+        print(f"{'=' * 80}")
+    elif level == 2:
+        print(f"\n{'─' * 80}")
+        print(f"  {text}")
+        print(f"{'─' * 80}")
+    else:
+        print(f"\n► {text}")
+
+
+def print_metric(label: str, value: Any, indent: int = 2) -> None:
+    """Print a metric in a consistent format."""
+    prefix = " " * indent
+    if isinstance(value, float):
+        print(f"{prefix}• {label}: {value:.4f}")
+    elif isinstance(value, int):
+        print(f"{prefix}• {label}: {value:,}")
+    else:
+        print(f"{prefix}• {label}: {value}")
+
+
+def print_progress(current: int, total: int, prefix: str = "Progress") -> None:
+    """Print progress indicator."""
+    pct = 100 * current / total
+    bar_length = 40
+    filled = int(bar_length * current / total)
+    bar = '█' * filled + '░' * (bar_length - filled)
+    print(f"\r{prefix}: [{bar}] {pct:.1f}% ({current}/{total})", end='', flush=True)
+    if current == total:
+        print()  # New line when complete
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,10 +205,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_enabled_methods(selected_groups: Sequence[str]) -> Set[str]:
-    """
-    Expand high-level group selections (linear / nonlinear / deeplearning) into the concrete
-    reducer names that should be kept in each experiment configuration.
-    """
+    """Expand high-level group selections into concrete reducer names."""
     enabled: Set[str] = set()
     for group in selected_groups:
         enabled.update(DR_GROUPS[group])
@@ -199,10 +218,7 @@ def filter_dimensionality_grid(
     grid: Dict[str, List[Dict[str, Any]]],
     enabled_methods: Set[str],
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Remove reducers that fall outside the requested DR groups while preserving the order of
-    the remaining method definitions.
-    """
+    """Remove reducers that fall outside the requested DR groups."""
     return {method: params for method, params in grid.items() if method in enabled_methods}
 
 
@@ -214,7 +230,7 @@ def determine_intrinsic_pca_dim(
     train_fraction: float,
     rng: np.random.Generator,
 ) -> Dict[str, Any]:
-    """Estimate d* via cumulative explained variance using a train split to avoid leakage."""
+    """Estimate d* via cumulative explained variance using a train split."""
     assert 0 < train_fraction <= 1.0, "train_fraction must be in (0, 1]"
     n_samples = X.shape[0]
     n_features = X.shape[1]
@@ -242,7 +258,6 @@ def determine_intrinsic_pca_dim(
 def _neighbor_candidates(n_samples: int) -> List[int]:
     if n_samples <= 3:
         return [2]
-    # Use log-scale heuristics so the graph sparsity adapts to dataset size without grids.
     base = max(5, int(round(np.log(n_samples))))
     candidates = sorted({min(base, n_samples - 1), min(base * 2, n_samples - 1)})
     return [int(c) for c in candidates if c >= 2]
@@ -262,16 +277,12 @@ def _median_gamma(X: np.ndarray, rng: np.random.Generator, sample_size: int = 20
         median = float(np.median(positive))
     if not np.isfinite(median) or median == 0:
         median = float(np.mean(positive)) if positive.size else 1.0
-    # Convert the distance scale into an RBF gamma following the median heuristic.
     gamma = 1.0 / (2.0 * median)
     return float(max(gamma, 1e-6))
 
 
 def _estimate_distance_scale(X: np.ndarray, rng: np.random.Generator, sample_size: int = 2048) -> float:
-    """
-    Estimate a characteristic distance scale for DBSCAN by computing the median pairwise
-    distance on a random subset of the data.
-    """
+    """Estimate characteristic distance scale for DBSCAN."""
     if X.shape[0] <= 1:
         return 1.0
     idx = rng.choice(X.shape[0], size=min(sample_size, X.shape[0]), replace=False)
@@ -284,19 +295,10 @@ def _estimate_distance_scale(X: np.ndarray, rng: np.random.Generator, sample_siz
 
 
 def _component_options(d_star: int) -> List[int]:
-    """Generate dimensionality options for PCA and similar methods.
-    
-    Uses coarse fractions of d* to probe compression vs noise trade-offs:
-    - Always include d*/2 and d* (the "sweet spot" range)
-    - Add d*/4 only when d* >= 12 (otherwise it's too small to be useful)
-    
-    This avoids fine-grained spacing (like 3/4 d*) that provides diminishing returns.
-    """
+    """Generate dimensionality options for PCA."""
     base = max(2, int(d_star))
     half = max(2, int(round(d_star / 2)))
     quarter = max(2, int(round(d_star / 4)))
-    
-    # Only include quarter if d* is reasonably large
     if d_star >= 12:
         return sorted({quarter, half, base})
     else:
@@ -304,28 +306,16 @@ def _component_options(d_star: int) -> List[int]:
 
 
 def _manifold_components(d_star: int) -> List[int]:
-    """Generate dimensionality options for manifold learning methods.
-    
-    Uses a coarse ladder of dimensions to test different compression levels:
-    - Low dimension (2 or d*/4): Tests aggressive compression
-    - Medium dimension (d*/2): Balanced compression
-    - Full dimension (d*): Preserves most structure
-    
-    When d* is small, we use fixed small values to avoid over-compression.
-    When d* is large (>= 12), we add d*/4 to explore aggressive bottlenecks.
-    """
+    """Generate dimensionality options for manifold learning."""
     base = max(2, int(d_star))
     half = max(2, int(round(d_star / 2)))
     
     if d_star >= 12:
-        # Large d*: use fractions including aggressive compression (d*/4)
         quarter = max(2, int(round(d_star / 4)))
         return sorted({quarter, half, base})
     elif d_star >= 8:
-        # Medium d*: use {2, d*/2, d*} for coarse sampling
         return sorted({2, half, base})
     else:
-        # Small d*: just use {2, d*} to avoid redundancy
         return sorted({2, base})
 
 
@@ -336,18 +326,13 @@ def create_dimensionality_grid(
     rng: np.random.Generator,
     neighbor_vals: Optional[List[int]] = None,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
-    """Build DR hyperparameter grids tied to heuristics described in the design doc.
-    
-    Returns:
-        Tuple of (config_dict, skipped_configs_list) where skipped_configs_list contains
-        configurations that were filtered out due to constraints.
-    """
+    """Build DR hyperparameter grids."""
     config: Dict[str, List[Dict[str, Any]]] = {}
     skipped_configs: List[Dict[str, Any]] = []
     component_options = _component_options(d_star)
     n_samples = X_reference.shape[0]
 
-    # --- Linear methods ----------------------------------------------------
+    # Linear methods
     config["PCA"] = [
         {"n_components": comp, "svd_solver": "auto", "whiten": False}
         for comp in component_options
@@ -356,7 +341,7 @@ def create_dimensionality_grid(
         {"n_components": max(2, int(d_star)), "max_iter": 400, "whiten": "unit-variance", "random_state": 42}
     ]
 
-    # --- Kernel / spectral methods -----------------------------------------
+    # Kernel methods
     gamma = _median_gamma(X_reference, rng=rng)
     config["KPCA"] = [
         {
@@ -367,7 +352,7 @@ def create_dimensionality_grid(
         }
     ]
     
-    # --- MDS (distance-preserving embedding) --------------------------------
+    # MDS
     mds_dims = _manifold_components(d_star)
     mds_dims = [d for d in mds_dims if d < n_samples]
     if mds_dims:
@@ -384,7 +369,7 @@ def create_dimensionality_grid(
     else:
         config["MDS"] = []
 
-    # --- Graph / manifold learners -----------------------------------------
+    # Graph/manifold learners
     manifold_dims = _manifold_components(d_star)
     if neighbor_vals is None:
         neighbor_vals = _neighbor_candidates(n_samples)
@@ -394,16 +379,12 @@ def create_dimensionality_grid(
             for comp in manifold_dims:
                 skip_reason = None
                 
-                # DiffusionMaps: cap n_components at 5 to avoid ARPACK convergence issues
                 if method == "DiffusionMaps" and comp > 5:
                     skip_reason = f"DiffusionMaps n_components > 5 (requested {comp})"
-                # ModifiedLLE requires n_neighbors > n_components
                 elif method == "ModifiedLLE" and n_nb <= comp:
                     skip_reason = f"ModifiedLLE requires n_neighbors > n_components (n_neighbors={n_nb}, n_components={comp})"
-                # Ensure n_neighbors < n_samples for all graph-based methods
                 elif n_nb >= n_samples:
                     skip_reason = f"n_neighbors >= n_samples ({n_nb} >= {n_samples})"
-                # Ensure n_components < n_samples
                 elif comp >= n_samples:
                     skip_reason = f"n_components >= n_samples ({comp} >= {n_samples})"
                 
@@ -432,14 +413,12 @@ def create_dimensionality_grid(
                     params.append(entry)
         config[method] = params
 
-    # --- Stochastic neighbor methods ---------------------------------------
-    # t-SNE requires perplexity < n_samples and typically perplexity < n_samples/3
+    # t-SNE
     perplexities = [p for p in (20, 30, 50) if p < (n_samples - 1) / 3]
     if not perplexities:
         fallback = max(5, min(30, (n_samples - 1) // 3))
         perplexities = [fallback]
     tsne_dims = sorted({2, max(2, min(3, d_star))})
-    # Ensure n_components < n_samples for t-SNE
     tsne_dims = [d for d in tsne_dims if d < n_samples]
     if tsne_dims:
         config["TSNE"] = [
@@ -448,7 +427,6 @@ def create_dimensionality_grid(
                 "n_components": comp,
                 "learning_rate": "auto",
                 "init": "pca",
-                "n_iter": 1000,
             }
             for perp in perplexities
             for comp in tsne_dims
@@ -456,7 +434,7 @@ def create_dimensionality_grid(
     else:
         config["TSNE"] = []
 
-    # --- UMAP & relatives ---------------------------------------------------
+    # UMAP
     umap_neighbors = sorted(set(neighbor_vals + [10, 20, 50]))
     umap_neighbors = [n for n in umap_neighbors if n < n_samples]
     if len(umap_neighbors) > 3:
@@ -464,7 +442,6 @@ def create_dimensionality_grid(
     if not umap_neighbors:
         umap_neighbors = [min(10, max(2, n_samples - 1))]
     umap_dims = sorted({2, max(2, int(d_star / 2)), max(2, min(3, d_star)), max(2, int(d_star))})
-    # Ensure n_components < n_samples for UMAP
     umap_dims = [d for d in umap_dims if d < n_samples]
     if umap_dims:
         config["UMAP"] = [
@@ -482,7 +459,7 @@ def create_dimensionality_grid(
     else:
         config["UMAP"] = []
 
-    # --- Density-preserving global methods ---------------------------------
+    # PHATE and TriMap
     phate_dims = [d for d in (2, max(2, int(d_star / 2)), max(2, int(d_star))) if d < n_samples]
     if phate_dims:
         config["PHATE"] = [
@@ -511,12 +488,12 @@ def create_dimensionality_grid(
             for comp in trimap_dims
             for inliers in (10, 20)
             for outliers in (5, 10)
-            if inliers < n_samples  # Ensure n_inliers < n_samples
+            if inliers < n_samples
         ]
     else:
         config["TriMap"] = []
 
-    # --- Deep learning methods ---------------------------------------------
+    # Deep learning
     encoding_dim = max(2, int(d_star))
     deep_hidden = (50, 100, 200)
     deep_epochs = (20, 50)
@@ -577,7 +554,7 @@ def create_clustering_grid(
     ]
     if not spectral_neighbors:
         spectral_neighbors = [15, 20]
-    spectral_values = list(dict.fromkeys(spectral_neighbors))  # preserve order, unique
+    spectral_values = list(dict.fromkeys(spectral_neighbors))
     if len(spectral_values) == 1:
         spectral_values.append(spectral_values[0])
 
@@ -605,47 +582,29 @@ def preprocess_dataset_no_split(
     seed: int,
     d_star_override: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Preprocess data with PCA without train/test split.
-    
-    For methods that don't require validation (linear/nonlinear), we can use all data.
-    
-    Args:
-        X_raw: Raw spike features (n_samples, n_features)
-        labels: Ground truth labels
-        args: Argument namespace with configuration
-        seed: Random seed for reproducibility
-        d_star_override: If provided, use this d_star instead of computing from variance
-        
-    Returns:
-        data: Dict with X_pca, labels, d_star, etc.
-    """
+    """Preprocess data with PCA without train/test split."""
     pca_rng = np.random.default_rng(seed + 73)
     
     if d_star_override is not None:
-        # Use fixed d_star value
         d_star = d_star_override
         n_components = min(X_raw.shape[1], args.max_pca_fit, X_raw.shape[0])
         pca_model = PCA(n_components=n_components, svd_solver="full")
         pca_model.fit(X_raw)
         cumulative_variance = np.cumsum(pca_model.explained_variance_ratio_).tolist()
     else:
-        # Compute d_star from variance threshold
         pca_result = determine_intrinsic_pca_dim(
             X_raw,
             variance_threshold=args.variance_threshold,
             component_cap=args.max_pca_components,
             fit_cap=args.max_pca_fit,
-            train_fraction=args.pca_train_fraction,  # Use fraction to avoid leakage in d_star estimation
+            train_fraction=args.pca_train_fraction,
             rng=pca_rng,
         )
         pca_model = pca_result['pca_model']
         d_star = pca_result['d_star']
         cumulative_variance = pca_result['cumulative_variance']
     
-    # Transform all data
     X_pca = pca_model.transform(X_raw)[:, :d_star]
-    
-    # Compute hyperparameter statistics
     distance_scale = _estimate_distance_scale(X_pca, rng=np.random.default_rng(seed + 19))
     
     data = {
@@ -660,8 +619,8 @@ def preprocess_dataset_no_split(
     }
     
     variance_pct = cumulative_variance[d_star-1] if d_star <= len(cumulative_variance) else cumulative_variance[-1]
-    print(f"   Using all {len(X_raw)} spikes")
-    print(f"   d* = {d_star} (variance explained: {variance_pct:.1%})")
+    print_metric("Total spikes", len(X_raw))
+    print_metric("d*", f"{d_star} (variance explained: {variance_pct:.1%})")
     
     return data
 
@@ -673,33 +632,17 @@ def split_and_preprocess_dataset(
     seed: int,
     d_star_override: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Split data and fit PCA on training set only to avoid leakage.
-    
-    This function ensures proper train/test isolation:
-    1. Splits data using stratified sampling
-    2. Fits PCA and computes d_star on TRAINING set only
-    3. Transforms both train and test using training-fit PCA
-    4. Computes hyperparameter statistics on TRAINING set only
-    
-    Args:
-        X_raw: Raw spike features (n_samples, n_features)
-        labels: Ground truth labels
-        args: Argument namespace with configuration
-        seed: Random seed for reproducibility
-        d_star_override: If provided, use this d_star instead of computing from variance
-        
-    Returns:
-        train_data: Dict with X_train, X_pca_train, labels_train, d_star, etc.
-        test_data: Dict with X_test, X_pca_test, labels_test
-    """
-    from sklearn.model_selection import train_test_split
-    
-    # Stratified train/test split (default 80/20)
+    """Split data and fit PCA on training set only."""
     test_size = 0.2
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    can_stratify = len(unique_labels) >= 2 and np.all(counts >= 2)
+    stratify_param = labels if can_stratify else None
+    if not can_stratify:
+        print_progress(1, 1, prefix="Stratified split disabled (small classes)")
     train_idx, test_idx = train_test_split(
         np.arange(len(X_raw)),
         test_size=test_size,
-        stratify=labels,
+        stratify=stratify_param,
         random_state=seed
     )
     
@@ -708,35 +651,29 @@ def split_and_preprocess_dataset(
     y_train = labels[train_idx]
     y_test = labels[test_idx]
     
-    # Fit PCA on TRAINING set only
     pca_rng = np.random.default_rng(seed + 73)
     
     if d_star_override is not None:
-        # Use fixed d_star value
         d_star = d_star_override
         n_components = min(X_train.shape[1], args.max_pca_fit, X_train.shape[0])
         pca_model = PCA(n_components=n_components, svd_solver="full")
         pca_model.fit(X_train)
         cumulative_variance = np.cumsum(pca_model.explained_variance_ratio_).tolist()
     else:
-        # Compute d_star from variance threshold
         pca_result = determine_intrinsic_pca_dim(
-            X_train,  # Only training data!
+            X_train,
             variance_threshold=args.variance_threshold,
             component_cap=args.max_pca_components,
             fit_cap=args.max_pca_fit,
-            train_fraction=1.0,  # Use all training data (already split)
+            train_fraction=1.0,
             rng=pca_rng,
         )
         pca_model = pca_result['pca_model']
         d_star = pca_result['d_star']
         cumulative_variance = pca_result['cumulative_variance']
     
-    # Transform train and test using training-fit PCA
     X_pca_train = pca_model.transform(X_train)[:, :d_star]
     X_pca_test = pca_model.transform(X_test)[:, :d_star]
-    
-    # Compute hyperparameter statistics on TRAINING set only
     distance_scale = _estimate_distance_scale(X_pca_train, rng=np.random.default_rng(seed + 19))
     
     train_data = {
@@ -755,12 +692,12 @@ def split_and_preprocess_dataset(
         'X_pca': X_pca_test,
         'labels': y_test,
         'n_spikes': len(X_test),
-        'indices': test_idx,  # Track which samples are in test set
+        'indices': test_idx,
     }
     
     variance_pct = cumulative_variance[d_star-1] if d_star <= len(cumulative_variance) else cumulative_variance[-1]
-    print(f"   Train/Test split: {len(X_train)} train, {len(X_test)} test")
-    print(f"   d* = {d_star} (variance explained: {variance_pct:.1%})")
+    print_metric("Train/Test split", f"{len(X_train)} train, {len(X_test)} test")
+    print_metric("d*", f"{d_star} (variance explained: {variance_pct:.1%})")
     
     return train_data, test_data
 
@@ -770,16 +707,7 @@ def prepare_dataset(
     seed: int,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    """Generate synthetic recording and extract raw spike features.
-    
-    IMPORTANT: No PCA preprocessing is done here to avoid data leakage!
-    PCA will be fit on the training set only after train/test split.
-    
-    Returns a dataset dict containing:
-        - X_raw: Raw spike features (NOT preprocessed yet)
-        - labels: Ground-truth spike labels
-        - Metadata: Dataset name, seed, true_k, etc.
-    """
+    """Generate synthetic recording and extract raw spike features."""
     static_rec, _, gt_sorting = create_synthetic_recording(
         num_units=args.num_units,
         duration=args.synthetic_duration,
@@ -795,17 +723,17 @@ def prepare_dataset(
     X_raw, peak_locations, preprocess_meta = prepare_spike_features(
         recording, 
         threshold=args.detect_threshold,
-        synthetic_pipeline=True,  # Using synthetic data preprocessing
+        synthetic_pipeline=True,
         apply_ibl_pipeline=args.apply_ibl_pipeline,
         correct_motion=args.correct_motion,
         motion_preset=args.motion_preset,
         cache_dir=str(Path(args.output_dir) / "preprocessing_cache") if args.apply_ibl_pipeline else None,
-        save_motion=args.correct_motion,  # Save motion data if correction is applied
-        save_rec=False,  # Don't save intermediate recordings by default
+        save_motion=args.correct_motion,
+        save_rec=False,
         job_kwargs={"n_jobs": args.n_jobs} if args.n_jobs > 1 else None,
     )
     labels_full = match_ground_truth(gt_crop, peak_locations, recording)
-    matched_mask = labels_full >= 0  # keep only spikes that found a GT match
+    matched_mask = labels_full >= 0
     if not np.any(matched_mask):
         raise RuntimeError("No spikes matched to ground truth; consider lowering detection threshold.")
     X_raw = X_raw[matched_mask]
@@ -831,29 +759,14 @@ def run_single_pipeline(
     config: Dict[str, Any],
     enabled_methods: Set[str],
 ) -> List[Dict[str, Any]]:
-    """Run experiments with appropriate preprocessing for each method type.
-    
-    Linear methods (PCA, ICA) run on raw waveforms.
-    Nonlinear and deep learning methods run on PCA-preprocessed features.
-    
-    Args:
-        runner: ExperimentRunner instance
-        dataset: Dataset dict containing X_raw, X_pca, labels, and metadata
-        config: Combined DR + clustering configuration
-        enabled_methods: Set of enabled DR method names
-        
-    Returns:
-        List of result dictionaries with metadata attached
-    """
+    """Run experiments with appropriate preprocessing."""
     dataset_name = dataset["dataset_name"]
     all_results = []
     
-    # Determine which method groups are enabled
     linear_methods = enabled_methods & DR_GROUPS["linear"]
     nonlinear_methods = enabled_methods & DR_GROUPS["nonlinear"]
     deeplearning_methods = enabled_methods & DR_GROUPS["deeplearning"]
     
-    # Run linear methods on RAW data (no PCA preprocessing)
     if linear_methods:
         linear_config = {
             "dimensionality_reduction": {
@@ -862,7 +775,7 @@ def run_single_pipeline(
             },
             "clustering": config["clustering"]
         }
-        if linear_config["dimensionality_reduction"]:  # Only run if there are configs
+        if linear_config["dimensionality_reduction"]:
             linear_results = runner.run_experiments(
                 X=dataset["X_raw"],
                 config=linear_config,
@@ -871,7 +784,6 @@ def run_single_pipeline(
             )
             all_results.extend(linear_results)
     
-    # Run nonlinear + deep learning methods on PCA-preprocessed data
     if nonlinear_methods or deeplearning_methods:
         nonlinear_deeplearning_config = {
             "dimensionality_reduction": {
@@ -880,7 +792,7 @@ def run_single_pipeline(
             },
             "clustering": config["clustering"]
         }
-        if nonlinear_deeplearning_config["dimensionality_reduction"]:  # Only run if there are configs
+        if nonlinear_deeplearning_config["dimensionality_reduction"]:
             nonlinear_deeplearning_results = runner.run_experiments(
                 X=dataset["X_pca"],
                 config=nonlinear_deeplearning_config,
@@ -889,7 +801,6 @@ def run_single_pipeline(
             )
             all_results.extend(nonlinear_deeplearning_results)
     
-    # Attach dataset metadata to each result
     for result in all_results:
         result["dataset_idx"] = dataset["dataset_idx"]
         result["dataset_seed"] = dataset["seed"]
@@ -899,7 +810,6 @@ def run_single_pipeline(
         result["n_features_raw"] = dataset["n_features"]
         result["n_features_preprocessed"] = dataset["X_pca"].shape[1]
         
-        # Add string versions of params for compatibility with visualization
         if "dim_reduction_params" in result:
             result["dim_params_str"] = json.dumps(result["dim_reduction_params"])
         if "clustering_params" in result:
@@ -909,19 +819,16 @@ def run_single_pipeline(
 
 
 def build_results_dataframe(results: Sequence[Dict[str, Any]]) -> pd.DataFrame:
-    """Flatten experiment results into a DataFrame for analysis.
-    
-    Args:
-        results: List of result dictionaries from ExperimentRunner
-        
-    Returns:
-        DataFrame with flattened metrics and serialized parameter configurations
-    """
+    """Flatten experiment results into a DataFrame with timing and grouping keys."""
     rows: List[Dict[str, Any]] = []
     for res in results:
         if not res.get("success"):
             continue
         evaluation = res.get("evaluation") or {}
+        dim_meta = res.get("dim_reduction_metadata") or {}
+        clust_meta = res.get("clustering_metadata") or {}
+        dim_params_str = json.dumps(res.get("dim_reduction_params", {}), sort_keys=True)
+        clust_params_str = json.dumps(res.get("clustering_params", {}), sort_keys=True)
         row = {
             "dataset_name": res.get("dataset_name"),
             "dataset_idx": res.get("dataset_idx"),
@@ -934,28 +841,29 @@ def build_results_dataframe(results: Sequence[Dict[str, Any]]) -> pd.DataFrame:
             "silhouette": evaluation.get("silhouette_score"),
             "davies_bouldin": evaluation.get("davies_bouldin_index"),
             "calinski_harabasz": evaluation.get("calinski_harabasz_index"),
-            "dim_params": json.dumps(res.get("dim_reduction_params", {}), sort_keys=True),
-            "clust_params": json.dumps(res.get("clustering_params", {}), sort_keys=True),
+            "dim_params": dim_params_str,
+            "clust_params": clust_params_str,
             "d_star": res.get("d_star"),
             "true_k": res.get("true_k"),
             "n_spikes": res.get("n_spikes"),
+            "dim_key": f"{res.get('dim_reduction_method')}:{dim_params_str}",
+            "clust_key": f"{res.get('clustering_method')}:{clust_params_str}",
+            "dim_reduction_time": dim_meta.get("computation_time"),
+            "dim_reduction_memory": dim_meta.get("memory_usage_mb"),
+            "clustering_time": clust_meta.get("computation_time"),
+            "n_clusters_pred": clust_meta.get("n_clusters"),
         }
         rows.append(row)
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["is_dim_key_primary"] = ~df.duplicated(subset=["dim_key"], keep="first")
+    df.loc[~df["is_dim_key_primary"], ["dim_reduction_time", "dim_reduction_memory"]] = np.nan
+    return df
 
 
 def select_best_configs(df: pd.DataFrame) -> pd.DataFrame:
-    """Select the best hyperparameter configuration for each (DR, clusterer) pair.
-    
-    Best configurations are determined by averaging ARI across all dataset seeds,
-    with V-measure and NMI as tie-breakers.
-    
-    Args:
-        df: Results DataFrame with columns for metrics and parameters
-        
-    Returns:
-        DataFrame with best configuration per (DR method, clustering method) pair
-    """
+    """Select best hyperparameter configuration for each (DR, clusterer) pair."""
     if df.empty or "ari" not in df:
         return pd.DataFrame()
     
@@ -970,7 +878,6 @@ def select_best_configs(df: pd.DataFrame) -> pd.DataFrame:
         "clust_params",
     ]
     
-    # Average ARI (and tie-breaker metrics) over seeds to score each hyperparameter combo
     summary = (
         metric_df.groupby(group_cols, as_index=False)[["ari", "v_measure", "nmi"]]
         .mean()
@@ -978,7 +885,6 @@ def select_best_configs(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     def pick_best(group: pd.DataFrame) -> pd.Series:
-        # Deterministic ranking order: ARI primary, V-measure and NMI as tie-breakers
         ordered = group.sort_values(
             by=["ari", "v_measure", "nmi"],
             ascending=[False, False, False],
@@ -1003,26 +909,13 @@ def select_best_configs(df: pd.DataFrame) -> pd.DataFrame:
     )
     best["dim_reduction_params"] = best["dim_params"].apply(json.loads)
     best["clustering_params"] = best["clust_params"].apply(json.loads)
-    
-    # Sort by best ARI descending
     best = best.sort_values(by="best_ari", ascending=False)
     
     return best
 
 
 def analyze_method_performance(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Analyze performance by method pair using both peak and average metrics.
-    
-    Creates two views:
-    1. Peak performance: Best single result for each (DR, clustering) pair
-    2. Average performance: Mean performance across all configurations for each pair
-    
-    Args:
-        df: Results DataFrame with columns for metrics and parameters
-        
-    Returns:
-        Tuple of (peak_performance_df, average_performance_df)
-    """
+    """Analyze performance by method pair using peak and average metrics."""
     if df.empty or "ari" not in df:
         return pd.DataFrame(), pd.DataFrame()
     
@@ -1030,43 +923,34 @@ def analyze_method_performance(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataF
     if metric_df.empty:
         return pd.DataFrame(), pd.DataFrame()
     
-    # Group by method pair (ignoring hyperparameters)
     method_cols = ["dim_reduction_method", "clustering_method"]
     
-    # Peak performance: max ARI achieved by any configuration for each method pair
     peak = metric_df.groupby(method_cols, as_index=False).agg({
         "ari": ["max", "mean", "std", "count"],
         "v_measure": ["max", "mean"],
         "nmi": ["max", "mean"],
     })
     
-    # Flatten column names
     peak.columns = [
         "dim_reduction_method", "clustering_method",
         "peak_ari", "mean_ari", "std_ari", "n_configs",
         "peak_v_measure", "mean_v_measure",
         "peak_nmi", "mean_nmi"
     ]
-    
-    # Sort by peak ARI
     peak = peak.sort_values(by="peak_ari", ascending=False).reset_index(drop=True)
     
-    # Average performance: mean ARI across all configurations for each method pair
     avg = metric_df.groupby(method_cols, as_index=False).agg({
         "ari": ["mean", "std", "min", "max", "count"],
         "v_measure": ["mean", "std"],
         "nmi": ["mean", "std"],
     })
     
-    # Flatten column names
     avg.columns = [
         "dim_reduction_method", "clustering_method",
         "mean_ari", "std_ari", "min_ari", "max_ari", "n_configs",
         "mean_v_measure", "std_v_measure",
         "mean_nmi", "std_nmi"
     ]
-    
-    # Sort by mean ARI
     avg = avg.sort_values(by="mean_ari", ascending=False).reset_index(drop=True)
     
     return peak, avg
@@ -1080,62 +964,308 @@ def compute_unsupervised_correlations(df: pd.DataFrame) -> Dict[str, float]:
         sub = df[["ari", metric]].dropna()
         if len(sub) < 2:
             continue
-        # Store simple Pearson correlations to see whether unsupervised scores mirror ARI.
         correlations[metric] = float(sub["ari"].corr(sub[metric]))
     return correlations
 
 
+ 
+
+
+def create_block_diagonal_matrix(
+    X: np.ndarray,
+    labels_true: np.ndarray,
+    labels_pred: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """Create block diagonal distance matrix visualization."""
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Sort by true labels
+    true_order = np.argsort(labels_true)
+    X_sorted_true = X[true_order]
+    labels_sorted_true = labels_true[true_order]
+    
+    # Sort by predicted labels
+    pred_order = np.argsort(labels_pred)
+    X_sorted_pred = X[pred_order]
+    labels_sorted_pred = labels_pred[pred_order]
+    
+    # Compute distance matrices (subsample if too large)
+    max_samples = 500
+    if len(X) > max_samples:
+        idx_true = np.random.choice(len(X_sorted_true), max_samples, replace=False)
+        idx_true = np.sort(idx_true)
+        D_true = pairwise_distances(X_sorted_true[idx_true], metric='euclidean')
+        labels_plot_true = labels_sorted_true[idx_true]
+        
+        idx_pred = np.random.choice(len(X_sorted_pred), max_samples, replace=False)
+        idx_pred = np.sort(idx_pred)
+        D_pred = pairwise_distances(X_sorted_pred[idx_pred], metric='euclidean')
+        labels_plot_pred = labels_sorted_pred[idx_pred]
+    else:
+        D_true = pairwise_distances(X_sorted_true, metric='euclidean')
+        labels_plot_true = labels_sorted_true
+        D_pred = pairwise_distances(X_sorted_pred, metric='euclidean')
+        labels_plot_pred = labels_sorted_pred
+    
+    # Plot ground truth
+    im1 = axes[0].imshow(D_true, cmap='viridis', aspect='auto')
+    axes[0].set_title('Distance Matrix (Ground Truth Order)', fontsize=12, fontweight='bold')
+    axes[0].set_xlabel('Spike Index')
+    axes[0].set_ylabel('Spike Index')
+    
+    # Add cluster boundaries for ground truth
+    boundaries_true = np.where(np.diff(labels_plot_true))[0] + 0.5
+    for b in boundaries_true:
+        axes[0].axhline(b, color='red', linewidth=1.5, alpha=0.7)
+        axes[0].axvline(b, color='red', linewidth=1.5, alpha=0.7)
+    
+    plt.colorbar(im1, ax=axes[0], label='Euclidean Distance')
+    
+    # Plot predicted
+    im2 = axes[1].imshow(D_pred, cmap='viridis', aspect='auto')
+    axes[1].set_title('Distance Matrix (Predicted Order)', fontsize=12, fontweight='bold')
+    axes[1].set_xlabel('Spike Index')
+    axes[1].set_ylabel('Spike Index')
+    
+    # Add cluster boundaries for predicted
+    boundaries_pred = np.where(np.diff(labels_plot_pred))[0] + 0.5
+    for b in boundaries_pred:
+        axes[1].axhline(b, color='red', linewidth=1.5, alpha=0.7)
+        axes[1].axvline(b, color='red', linewidth=1.5, alpha=0.7)
+    
+    plt.colorbar(im2, ax=axes[1], label='Euclidean Distance')
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'distance_matrix_block_diagonal.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_performance_bars(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create bar charts comparing performance metrics across methods."""
+    
+    # Get top 10 method combinations by ARI
+    method_pairs = results_df.groupby(['dim_reduction_method', 'clustering_method']).agg({
+        'ari': 'mean',
+        'v_measure': 'mean',
+        'nmi': 'mean',
+        'silhouette': 'mean',
+    }).reset_index()
+    
+    method_pairs['method_combo'] = (method_pairs['dim_reduction_method'] + 
+                                     ' + ' + method_pairs['clustering_method'])
+    method_pairs = method_pairs.sort_values('ari', ascending=False).head(10)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Performance Metrics Comparison (Top 10 Method Combinations)', 
+                 fontsize=16, fontweight='bold')
+    
+    metrics = [('ari', 'Adjusted Rand Index', axes[0, 0]),
+               ('v_measure', 'V-Measure', axes[0, 1]),
+               ('nmi', 'Normalized Mutual Information', axes[1, 0]),
+               ('silhouette', 'Silhouette Score', axes[1, 1])]
+    
+    for metric, title, ax in metrics:
+        data = method_pairs.sort_values(metric, ascending=True)
+        colors = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(data)))
+        
+        bars = ax.barh(range(len(data)), data[metric], color=colors)
+        ax.set_yticks(range(len(data)))
+        ax.set_yticklabels(data['method_combo'], fontsize=9)
+        ax.set_xlabel(title, fontsize=11)
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.grid(axis='x', alpha=0.3)
+        
+        # Add value labels
+        for i, (bar, val) in enumerate(zip(bars, data[metric])):
+            if not np.isnan(val):
+                ax.text(val, i, f' {val:.3f}', va='center', fontsize=8)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'performance_metrics_bars.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_method_heatmap(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create heatmap of method performance."""
+    
+    # Pivot to get DR methods vs clustering methods
+    pivot = results_df.pivot_table(
+        values='ari',
+        index='dim_reduction_method',
+        columns='clustering_method',
+        aggfunc='mean'
+    )
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(pivot, annot=True, fmt='.3f', cmap='RdYlGn', 
+                center=0.5, vmin=0, vmax=1,
+                linewidths=0.5, cbar_kws={'label': 'Mean ARI'},
+                ax=ax)
+    ax.set_title('Mean ARI by Method Combination', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Clustering Method', fontsize=12)
+    ax.set_ylabel('Dimensionality Reduction', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'method_heatmap.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_timing_plots(timing_info: Dict[str, float], output_dir: Path) -> None:
+    """Create timing analysis plots."""
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Bar chart of timing
+    methods = list(timing_info.keys())
+    times = list(timing_info.values())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(methods)))
+    
+    axes[0].barh(methods, times, color=colors)
+    axes[0].set_xlabel('Time (seconds)', fontsize=11)
+    axes[0].set_title('Computation Time by Method Group', fontsize=12, fontweight='bold')
+    axes[0].grid(axis='x', alpha=0.3)
+    
+    for i, (method, time_val) in enumerate(zip(methods, times)):
+        axes[0].text(time_val, i, f' {time_val:.2f}s', va='center', fontsize=9)
+    
+    # Pie chart of time proportion
+    axes[1].pie(times, labels=methods, autopct='%1.1f%%', colors=colors, startangle=90)
+    axes[1].set_title('Computation Time Proportion', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'computation_timing.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_metrics_distribution(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create distribution plots for various metrics."""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Metrics Distribution Across All Experiments', fontsize=14, fontweight='bold')
+    
+    metrics = ['ari', 'v_measure', 'nmi', 'silhouette']
+    titles = ['ARI Distribution', 'V-Measure Distribution', 
+              'NMI Distribution', 'Silhouette Score Distribution']
+    
+    for ax, metric, title in zip(axes.flat, metrics, titles):
+        data = results_df[metric].dropna()
+        
+        if len(data) > 0:
+            ax.hist(data, bins=30, alpha=0.7, color='steelblue', edgecolor='black')
+            ax.axvline(data.mean(), color='red', linestyle='--', linewidth=2, 
+                      label=f'Mean: {data.mean():.3f}')
+            ax.axvline(data.median(), color='green', linestyle='--', linewidth=2,
+                      label=f'Median: {data.median():.3f}')
+            ax.set_xlabel(metric.upper(), fontsize=11)
+            ax.set_ylabel('Frequency', fontsize=11)
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            ax.legend()
+            ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'metrics_distribution.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_correlation_scatter(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create scatter plots showing correlation between supervised and unsupervised metrics."""
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle('Supervised vs Unsupervised Metrics Correlation', 
+                 fontsize=14, fontweight='bold')
+    
+    unsupervised = [('silhouette', 'Silhouette Score'),
+                    ('davies_bouldin', 'Davies-Bouldin Index'),
+                    ('calinski_harabasz', 'Calinski-Harabasz Index')]
+    
+    for ax, (metric, label) in zip(axes, unsupervised):
+        data = results_df[['ari', metric]].dropna()
+        
+        if len(data) > 5:
+            ax.scatter(data[metric], data['ari'], alpha=0.5, s=30)
+            
+            # Add trend line
+            z = np.polyfit(data[metric], data['ari'], 1)
+            p = np.poly1d(z)
+            x_line = np.linspace(data[metric].min(), data[metric].max(), 100)
+            ax.plot(x_line, p(x_line), "r--", alpha=0.8, linewidth=2)
+            
+            # Calculate correlation
+            corr = data['ari'].corr(data[metric])
+            ax.text(0.05, 0.95, f'Correlation: {corr:.3f}',
+                   transform=ax.transAxes, fontsize=10,
+                   verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            ax.set_xlabel(label, fontsize=11)
+            ax.set_ylabel('ARI', fontsize=11)
+            ax.set_title(f'ARI vs {label}', fontsize=12, fontweight='bold')
+            ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'metrics_correlation.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
 def main() -> None:
+    """Enhanced main function with improved logging."""
     args = parse_args()
     seeds = args.seeds if args.seeds else [args.base_seed + i for i in range(args.num_datasets)]
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    
+    print_header("SPIKE SORTING PIPELINE COMPARISON", level=1)
+    print(f"\n📋 Configuration:")
+    print_metric("Datasets", len(seeds))
+    print_metric("Units per dataset", args.num_units)
+    print_metric("Recording duration", f"{args.subset_duration}s")
+    print_metric("DR groups", ", ".join(args.dr_groups))
+    print_metric("Output directory", str(output_dir))
+    
     runner = ExperimentRunner(
         output_dir=str(output_dir),
         n_jobs=args.n_jobs,
         verbose=not args.quiet,
         silent_errors=args.silent_errors,
     )
-
-    # Translate the CLI group selection into the reducer names we keep in each configuration.
-    enabled_methods = resolve_enabled_methods(args.dr_groups)
     
-    # Check if we're using deep learning methods (which need train/test split)
+    enabled_methods = resolve_enabled_methods(args.dr_groups)
     has_deeplearning = bool(enabled_methods & DR_GROUPS["deeplearning"])
-
+    
     all_results: List[Dict[str, Any]] = []
     dataset_summaries: List[Dict[str, Any]] = []
+    timing_info: Dict[str, List[float]] = {"linear": [], "nonlinear": [], "deeplearning": []}
     
-    # Track d_star performance if testing multiple values
-    d_star_performance: List[Dict[str, Any]] = []
-    
-    # Track last dataset's features and labels for visualization
+    # Track for visualization
     last_X_pca = None
-    last_labels = None
-
+    last_labels_true = None
+    last_labels_pred = None
+    last_best_config = None
+    
+    # Process datasets
+    print_header(f"Processing {len(seeds)} Dataset(s)", level=2)
+    
     for idx, seed in enumerate(seeds):
-        print(f"\n=== Dataset {idx + 1}/{len(seeds)} (seed={seed}) ===")
+        print_header(f"Dataset {idx + 1}/{len(seeds)} (seed={seed})", level=3)
         
-        # Step 1: Prepare raw dataset (NO PCA yet to avoid leakage)
+        dataset_start = time.time()
+        
+        # Prepare dataset
         dataset = prepare_dataset(idx, seed, args)
+        print_metric("Spikes detected", dataset["n_spikes"])
+        print_metric("True clusters", dataset["true_k"])
         
-        # Determine which d_star values to test
-        if args.d_star_values:
-            d_star_values = args.d_star_values
-            print(f"   Testing d_star values: {d_star_values}")
-        else:
-            d_star_values = [None]  # None means auto-compute
+        # Determine d_star values
+        d_star_values = args.d_star_values if args.d_star_values else [None]
         
-        # Test each d_star value
         for d_star_test in d_star_values:
             if d_star_test is not None:
-                print(f"\n   --- Testing d_star = {d_star_test} ---")
+                print(f"\n   Testing d_star = {d_star_test}")
             
-            # Step 2: Preprocess data (with or without train/test split)
+            # Preprocess
             if has_deeplearning:
-                # Deep learning needs train/test split to avoid overfitting
-                print(f"   Splitting data for deep learning methods...")
+                print("   Using train/test split for deep learning...")
                 train_data, test_data = split_and_preprocess_dataset(
                     X_raw=dataset["X_raw"],
                     labels=dataset["labels"],
@@ -1145,8 +1275,6 @@ def main() -> None:
                 )
                 use_train_only = True
             else:
-                # Linear/nonlinear methods can use all data
-                print(f"   Using all data (no split needed for linear/nonlinear methods)...")
                 train_data = preprocess_dataset_no_split(
                     X_raw=dataset["X_raw"],
                     labels=dataset["labels"],
@@ -1156,61 +1284,41 @@ def main() -> None:
                 )
                 use_train_only = False
             
-            # Metadata for tracking
-            if has_deeplearning:
-                n_spikes_train = train_data["n_spikes"]
-                n_spikes_test = dataset["n_spikes"] - train_data["n_spikes"]
-            else:
-                n_spikes_train = train_data["n_spikes"]
-                n_spikes_test = 0
-            
+            # Store metadata
             dataset_summary = {
                 "dataset_name": dataset["dataset_name"],
                 "seed": seed,
-                "n_spikes_total": dataset["n_spikes"],
-                "n_spikes_train": n_spikes_train,
-                "n_spikes_test": n_spikes_test,
+                "n_spikes": dataset["n_spikes"],
                 "n_features": dataset["n_features"],
                 "d_star": train_data["d_star"],
                 "true_k": dataset["true_k"],
-                "variance_threshold": args.variance_threshold,
-                "synthetic_duration": args.synthetic_duration,
-                "subset_duration": args.subset_duration,
-                "used_train_test_split": has_deeplearning,
             }
             dataset_summaries.append(dataset_summary)
-
-            include_supervised = train_data["labels"] is not None
             
-            # Step 3: Build grids using statistics from the data
+            # Build grids
             neighbor_vals = _neighbor_candidates(train_data["n_spikes"])
             
             dim_grid, skipped_dr_configs = create_dimensionality_grid(
                 d_star=train_data["d_star"],
                 X_reference=train_data["X_pca"],
-                include_supervised=include_supervised,
+                include_supervised=train_data["labels"] is not None,
                 rng=np.random.default_rng(seed + 17),
                 neighbor_vals=neighbor_vals,
             )
             dim_grid = filter_dimensionality_grid(dim_grid, enabled_methods)
-            if not dim_grid:
-                raise ValueError(
-                    "No dimensionality-reduction methods left after applying --dr-groups filter."
-                )
-
+            
             clustering_grid = create_clustering_grid(
                 dataset["true_k"],
                 train_data["distance_scale"],
                 neighbor_vals,
                 train_data["n_spikes"],
             )
-
-            # Step 4: Run experiments
+            
+            # Run experiments with timing
             config = {"dimensionality_reduction": dim_grid, "clustering": clustering_grid}
-            dataset_suffix = f"_dstar{train_data['d_star']}" if args.d_star_values else ""
             split_suffix = "_train" if use_train_only else ""
             train_dataset_info = {
-                "dataset_name": dataset["dataset_name"] + split_suffix + dataset_suffix,
+                "dataset_name": dataset["dataset_name"] + split_suffix,
                 "X_raw": train_data["X_raw"],
                 "X_pca": train_data["X_pca"],
                 "labels": train_data["labels"],
@@ -1222,205 +1330,490 @@ def main() -> None:
                 "n_features": dataset["n_features"],
             }
             
-            # Run actual experiments
-            experiment_results = run_single_pipeline(runner, train_dataset_info, config, enabled_methods)
-            all_results.extend(experiment_results)
+            # Track timing by method group
+            linear_methods = enabled_methods & DR_GROUPS["linear"]
+            nonlinear_methods = enabled_methods & DR_GROUPS["nonlinear"]
+            deeplearning_methods = enabled_methods & DR_GROUPS["deeplearning"]
             
-            # Save for visualization (use last dataset processed)
-            # For deep learning: combine train and test data for complete visualization
+            if linear_methods:
+                start_t = time.time()
+                linear_config = {
+                    "dimensionality_reduction": {k: v for k, v in dim_grid.items() if k in linear_methods},
+                    "clustering": clustering_grid
+                }
+                if linear_config["dimensionality_reduction"]:
+                    linear_results = runner.run_experiments(
+                        X=train_dataset_info["X_raw"],
+                        config=linear_config,
+                        y=train_dataset_info["labels"],
+                        dataset_name=train_dataset_info["dataset_name"],
+                    )
+                    all_results.extend(linear_results)
+                    timing_info["linear"].append(time.time() - start_t)
+            
+            if nonlinear_methods or deeplearning_methods:
+                combined_methods = nonlinear_methods | deeplearning_methods
+                start_t = time.time()
+                combined_config = {
+                    "dimensionality_reduction": {k: v for k, v in dim_grid.items() if k in combined_methods},
+                    "clustering": clustering_grid
+                }
+                if combined_config["dimensionality_reduction"]:
+                    combined_results = runner.run_experiments(
+                        X=train_dataset_info["X_pca"],
+                        config=combined_config,
+                        y=train_dataset_info["labels"],
+                        dataset_name=train_dataset_info["dataset_name"],
+                    )
+                    all_results.extend(combined_results)
+                    elapsed = time.time() - start_t
+                    if nonlinear_methods:
+                        timing_info["nonlinear"].append(elapsed)
+                    if deeplearning_methods:
+                        timing_info["deeplearning"].append(elapsed)
+            
+            # Add metadata to results
+            for result in all_results[-len(all_results):]:  # Only process new results
+                result["dataset_idx"] = dataset["dataset_idx"]
+                result["dataset_seed"] = dataset["seed"]
+                result["d_star"] = train_data["d_star"]
+                result["true_k"] = dataset["true_k"]
+                result["n_spikes"] = train_data["n_spikes"]
+                result["n_features_raw"] = dataset["n_features"]
+                result["n_features_preprocessed"] = train_data["X_pca"].shape[1]
+            
+            # Save for visualization
             if has_deeplearning:
-                # Combine train and test data back together
                 last_X_pca = np.vstack([train_data["X_pca"], test_data["X_pca"]])
-                last_labels = np.concatenate([train_data["labels"], test_data["labels"]])
+                last_labels_true = np.concatenate([train_data["labels"], test_data["labels"]])
             else:
-                # For non-deep learning, we already have all the data
                 last_X_pca = train_data["X_pca"]
-                last_labels = train_data["labels"]
-            
-            # Track performance for this d_star value
-            if args.d_star_values:
-                successful_results = [r for r in experiment_results if r.get("success")]
-                if successful_results:
-                    aris = [r["evaluation"]["adjusted_rand_index"] 
-                           for r in successful_results 
-                           if r.get("evaluation") and "adjusted_rand_index" in r["evaluation"]]
-                    if aris:
-                        mean_ari = float(np.mean(aris))
-                        max_ari = float(np.max(aris))
-                        d_star_performance.append({
-                            "dataset_idx": idx,
-                            "seed": seed,
-                            "d_star": train_data["d_star"],
-                            "mean_ari": mean_ari,
-                            "max_ari": max_ari,
-                            "n_experiments": len(aris),
-                        })
-            
-            # Document skipped configurations as failures
-            for skipped in skipped_dr_configs:
-                # Only document if the method is in enabled_methods
-                if skipped["method"] not in enabled_methods:
-                    continue
-                    
-                # Create a failure result for each clustering method
-                for clust_method, clust_params_list in clustering_grid.items():
-                    for clust_params in clust_params_list:
-                        failure_result = {
-                            "experiment_idx": -1,  # Marker for skipped configs
-                            "dim_reduction_method": skipped["method"],
-                            "dim_reduction_params": skipped["params"],
-                            "clustering_method": clust_method,
-                            "clustering_params": clust_params,
-                            "success": False,
-                            "error": f"Configuration skipped: {skipped['skip_reason']}",
-                            "dataset_name": train_dataset_info["dataset_name"],
-                            "dataset_idx": dataset["dataset_idx"],
-                            "dataset_seed": dataset["seed"],
-                            "d_star": train_data["d_star"],
-                            "true_k": dataset["true_k"],
-                            "n_spikes": train_data["n_spikes"],
-                            "n_features_raw": dataset["n_features"],
-                            "n_features_preprocessed": train_data["X_pca"].shape[1],
-                            "data_shape": train_data["X_pca"].shape,
-                            "has_ground_truth": train_data["labels"] is not None,
-                        }
-                        all_results.append(failure_result)
-
+                last_labels_true = train_data["labels"]
+        
+        dataset_time = time.time() - dataset_start
+        print_metric("Dataset processing time", f"{dataset_time:.2f}s")
+    
+    # Save results
+    print_header("Saving Results", level=2)
     runner.save_results(filename=args.results_name)
-
+    
+    # Analysis
     results_df = build_results_dataframe(all_results)
     best_configs = select_best_configs(results_df)
     peak_performance, avg_performance = analyze_method_performance(results_df)
     correlations = compute_unsupervised_correlations(results_df)
-
-    best_path = output_dir / "best_configs.csv"
-    peak_performance_path = output_dir / "peak_performance.csv"
-    avg_performance_path = output_dir / "average_performance.csv"
-    full_results_path = output_dir / "all_results.csv"
-    meta_path = output_dir / "dataset_metadata.json"
-    corr_path = output_dir / "unsupervised_metric_correlations.json"
-
+    
+    # Save CSVs
     if not best_configs.empty:
-        best_configs.to_csv(best_path, index=False)
-        print(f"\nSaved best configurations (per DR + clustering method) to: {best_path}")
+        best_configs.to_csv(output_dir / "best_configs.csv", index=False)
+        print_metric("Best configs saved", "best_configs.csv")
     
     if not peak_performance.empty:
-        peak_performance.to_csv(peak_performance_path, index=False)
-        print(f"Saved peak performance analysis to: {peak_performance_path}")
+        peak_performance.to_csv(output_dir / "peak_performance.csv", index=False)
+        print_metric("Peak performance saved", "peak_performance.csv")
     
     if not avg_performance.empty:
-        avg_performance.to_csv(avg_performance_path, index=False)
-        print(f"Saved average performance analysis to: {avg_performance_path}")
+        avg_performance.to_csv(output_dir / "average_performance.csv", index=False)
+        print_metric("Average performance saved", "average_performance.csv")
     
     if not results_df.empty:
-        results_df.to_csv(full_results_path, index=False)
-        print(f"Saved full results table to: {full_results_path}")
+        results_df.to_csv(output_dir / "all_results.csv", index=False)
+        print_metric("All results saved", "all_results.csv")
     
-    with open(meta_path, "w", encoding="utf-8") as f:
+    with open(output_dir / "dataset_metadata.json", "w", encoding="utf-8") as f:
         json.dump(dataset_summaries, f, indent=2)
-    print(f"Dataset metadata stored at: {meta_path}")
+    print_metric("Metadata saved", "dataset_metadata.json")
     
     if correlations:
-        with open(corr_path, "w", encoding="utf-8") as f:
+        with open(output_dir / "unsupervised_metric_correlations.json", "w", encoding="utf-8") as f:
             json.dump(correlations, f, indent=2)
-        print(f"Unsupervised metric correlations stored at: {corr_path}")
+        print_metric("Correlations saved", "unsupervised_metric_correlations.json")
     
-    # Save and print d_star comparison if multiple values were tested
-    if d_star_performance:
-        d_star_path = output_dir / "d_star_comparison.json"
-        with open(d_star_path, "w", encoding="utf-8") as f:
-            json.dump(d_star_performance, f, indent=2)
-        print(f"d_star comparison results stored at: {d_star_path}")
-        
-        # Analyze and print best d_star
-        print("\n=== d_star Performance Comparison ===")
-        d_star_df = pd.DataFrame(d_star_performance)
-        
-        # Group by d_star and compute average performance
-        d_star_summary = d_star_df.groupby("d_star").agg({
-            "mean_ari": ["mean", "std"],
-            "max_ari": ["mean", "std"],
-            "n_experiments": "sum"
-        }).round(4)
-        
-        print("\nAverage performance across all datasets by d_star:")
-        print(d_star_summary)
-        
-        # Find best d_star
-        best_mean_ari = d_star_df.groupby("d_star")["mean_ari"].mean()
-        best_d_star = int(best_mean_ari.idxmax())
-        best_ari_value = best_mean_ari.max()
-        
-        print(f"\n*** BEST d_star: {best_d_star} (average ARI: {best_ari_value:.4f}) ***")
-        
-        # Per-dataset best d_star
-        print("\nBest d_star per dataset:")
-        for dataset_idx in d_star_df["dataset_idx"].unique():
-            dataset_perf = d_star_df[d_star_df["dataset_idx"] == dataset_idx]
-            best_for_dataset = dataset_perf.loc[dataset_perf["mean_ari"].idxmax()]
-            print(f"  Dataset {dataset_idx} (seed={int(best_for_dataset['seed'])}): "
-                  f"d_star={int(best_for_dataset['d_star'])} "
-                  f"(mean ARI={best_for_dataset['mean_ari']:.4f}, "
-                  f"max ARI={best_for_dataset['max_ari']:.4f})")
-
-    # Print performance analysis summaries
+    # Print summary
+    print_header("Performance Summary", level=2)
     if not peak_performance.empty:
-        print("\n=== Peak Performance (Best Single Config per Method Pair) ===")
-        print("\nTop 10 method combinations by peak ARI:")
-        top_peak = peak_performance.head(10)[["dim_reduction_method", "clustering_method", 
-                                               "peak_ari", "mean_ari", "std_ari", "n_configs"]]
-        print(top_peak.to_string(index=False))
+        print("\n🏆 Top 5 Method Combinations (by Peak ARI):")
+        top5 = peak_performance.head(5)
+        for i, row in top5.iterrows():
+            print(f"\n  {i+1}. {row['dim_reduction_method']} + {row['clustering_method']}")
+            print_metric("Peak ARI", row['peak_ari'], indent=6)
+            print_metric("Mean ARI", row['mean_ari'], indent=6)
+            print_metric("Configurations tested", int(row['n_configs']), indent=6)
     
-    if not avg_performance.empty:
-        print("\n=== Average Performance (Mean Across All Configs per Method Pair) ===")
-        print("\nTop 10 method combinations by average ARI:")
-        top_avg = avg_performance.head(10)[["dim_reduction_method", "clustering_method",
-                                             "mean_ari", "std_ari", "min_ari", "max_ari", "n_configs"]]
-        print(top_avg.to_string(index=False))
-        
-        # Identify most consistent methods (high mean, low std)
-        if len(avg_performance) > 0:
-            avg_performance["consistency_score"] = avg_performance["mean_ari"] / (avg_performance["std_ari"] + 1e-6)
-            most_consistent = avg_performance.nlargest(5, "consistency_score")
-            print("\n=== Most Consistent Methods (High Mean / Low Std) ===")
-            consistent_display = most_consistent[["dim_reduction_method", "clustering_method",
-                                                   "mean_ari", "std_ari", "consistency_score"]]
-            print(consistent_display.to_string(index=False))
-
-    print("\n=== DR + Clustering Comparison Complete ===")
-
-    analyzer = ResultsAnalyzer(all_results)
-    print("\nSummary statistics across all runs:")
-    print(analyzer.get_summary_statistics())
-    
-    # Print mean ARI per DR method
-    if not results_df.empty and "ari" in results_df.columns:
-        mean_ari = results_df.groupby("dim_reduction_method")["ari"].mean().sort_values(ascending=False)
-        print("\nBest mean ARI per dimensionality reduction method:")
-        print(mean_ari)
-    
-    # Visualize best clustering configuration (by mean ARI)
-    if last_X_pca is not None and len(all_results) > 0:
+    # Visualizations
+    if not results_df.empty and last_X_pca is not None and last_labels_true is not None:
         try:
-            if has_deeplearning:
-                print(f"\n[Visualization] Using complete dataset (train + test) for visualization: {last_X_pca.shape[0]} samples")
-            visualize_best_clusters(
-                X=last_X_pca,
-                y=last_labels if last_labels is not None else None,
-                results=all_results,
-                output_dir=output_dir / "visualizations",
-                max_points=50000,
-                plot_3d=True,
-                recording=None,
-                peak_locations=None,
-                export_to_phy_flag=False,
-                launch_phy_gui=False,
-                job_kwargs=None,
-                use_mean_ari=True,  # Use mean ARI across datasets for more robust selection
-            )
+            if not best_configs.empty:
+                top = best_configs.iloc[0]
+                dim_method = top['dim_reduction_method']
+                clust_method = top['clustering_method']
+                dim_params = top['dim_reduction_params']
+                clust_params = top['clustering_params']
+                reducer = create_reducer(dim_method, **dim_params)
+                X_emb = reducer.fit_transform(last_X_pca, last_labels_true)
+                if X_emb is None:
+                    raise RuntimeError("Reducer returned None embedding")
+                viz_indices = getattr(reducer, 'test_indices', None)
+                if viz_indices is None:
+                    viz_indices = np.arange(len(last_X_pca))
+                X_base = last_X_pca[viz_indices]
+                y_true_viz = last_labels_true[viz_indices]
+                clusterer = create_clustering(clust_method, **clust_params)
+                labels_pred = clusterer.fit_predict(X_emb)
+                best_cfg = {
+                    'dim_reduction_method': dim_method,
+                    'clustering_method': clust_method,
+                    'ari': float(top.get('best_ari', np.nan)),
+                    'dim_params': dim_params,
+                    'clust_params': clust_params,
+                }
+                timing_avg = {k: np.mean(v) if v else 0 for k, v in timing_info.items() if v}
+                create_enhanced_visualizations(
+                    X_pca=X_base,
+                    labels_true=y_true_viz,
+                    labels_pred=labels_pred,
+                    results_df=results_df,
+                    best_config=best_cfg,
+                    output_dir=output_dir / "visualizations",
+                    timing_info=timing_avg if timing_avg else None,
+                )
         except Exception as e:
-            import logging
-            logging.warning(f"Visualization failed: {e}")
+            print(f"[Visualization] Enhanced plots failed: {e}")
+    
+    
+    print_header("Pipeline Comparison Complete! ✓", level=1)
+    print(f"\n📁 Results saved to: {output_dir}")
+    viz_dir = output_dir / 'visualizations'
+    if viz_dir.exists():
+        print(f"📊 Visualizations saved to: {viz_dir}\n")
+
+
+ 
+
+
+def create_enhanced_visualizations(
+    X_pca: np.ndarray,
+    labels_true: np.ndarray,
+    labels_pred: np.ndarray,
+    results_df: pd.DataFrame,
+    best_config: Dict[str, Any],
+    output_dir: Path,
+    timing_info: Optional[Dict[str, float]] = None,
+) -> None:
+    """Create comprehensive visualization suite."""
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print_header("Generating Visualizations", level=3)
+    
+    # Set up color schemes
+    n_true = len(np.unique(labels_true))
+    n_pred = len(np.unique(labels_pred))
+    colors_true = plt.cm.tab20(np.linspace(0, 1, n_true))
+    colors_pred = plt.cm.tab20(np.linspace(0, 1, n_pred))
+    
+    # 1. 2D Cluster Comparison (Ground Truth vs Predicted)
+    print("  • Creating 2D cluster comparison...")
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Reduce to 2D for visualization
+    if X_pca.shape[1] > 2:
+        pca_2d = PCA(n_components=2)
+        X_2d = pca_2d.fit_transform(X_pca)
+        var_explained = pca_2d.explained_variance_ratio_.sum()
+    else:
+        X_2d = X_pca
+        var_explained = 1.0
+    
+    # Ground truth
+    for i, label in enumerate(np.unique(labels_true)):
+        mask = labels_true == label
+        axes[0].scatter(X_2d[mask, 0], X_2d[mask, 1], 
+                       c=[colors_true[i]], label=f'Unit {label}',
+                       alpha=0.6, s=20, edgecolors='none')
+    axes[0].set_title('Ground Truth Clusters', fontsize=14, fontweight='bold')
+    axes[0].set_xlabel(f'PC1 ({var_explained*100:.1f}% var explained)')
+    axes[0].set_ylabel('PC2')
+    axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    
+    # Predicted
+    for i, label in enumerate(np.unique(labels_pred)):
+        mask = labels_pred == label
+        axes[1].scatter(X_2d[mask, 0], X_2d[mask, 1],
+                       c=[colors_pred[i]], label=f'Cluster {label}',
+                       alpha=0.6, s=20, edgecolors='none')
+    axes[1].set_title(f'Predicted Clusters (ARI: {best_config.get("ari", 0):.3f})', 
+                     fontsize=14, fontweight='bold')
+    axes[1].set_xlabel(f'PC1 ({var_explained*100:.1f}% var explained)')
+    axes[1].set_ylabel('PC2')
+    axes[1].legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'cluster_comparison_2d.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 2. Block Diagonal Distance Matrix
+    print("  • Creating block diagonal distance matrix...")
+    create_block_diagonal_matrix(X_pca, labels_true, labels_pred, output_dir)
+    
+    # 3. Performance Metrics Bar Chart
+    print("  • Creating performance metrics comparison...")
+    create_performance_bars(results_df, output_dir)
+    
+    # 4. Method Comparison Heatmap
+    print("  • Creating method comparison heatmap...")
+    create_method_heatmap(results_df, output_dir)
+    
+    # 5. Computation Time Analysis
+    if timing_info:
+        print("  • Creating timing analysis...")
+        create_timing_plots(timing_info, output_dir)
+    
+    # 6. Metrics Distribution
+    print("  • Creating metrics distribution plots...")
+    create_metrics_distribution(results_df, output_dir)
+    
+    # 7. ARI vs Silhouette Scatter
+    print("  • Creating ARI vs unsupervised metrics scatter...")
+    create_correlation_scatter(results_df, output_dir)
+    
+    print(f"\n  ✓ All visualizations saved to: {output_dir}")
+
+
+def create_block_diagonal_matrix(
+    X: np.ndarray,
+    labels_true: np.ndarray,
+    labels_pred: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """Create block diagonal distance matrix visualization."""
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Sort by true labels
+    true_order = np.argsort(labels_true)
+    X_sorted_true = X[true_order]
+    labels_sorted_true = labels_true[true_order]
+    
+    # Sort by predicted labels
+    pred_order = np.argsort(labels_pred)
+    X_sorted_pred = X[pred_order]
+    labels_sorted_pred = labels_pred[pred_order]
+    
+    # Compute distance matrices (subsample if too large)
+    max_samples = 500
+    if len(X) > max_samples:
+        idx_true = np.random.choice(len(X_sorted_true), max_samples, replace=False)
+        idx_true = np.sort(idx_true)
+        D_true = pairwise_distances(X_sorted_true[idx_true], metric='euclidean')
+        labels_plot_true = labels_sorted_true[idx_true]
+        
+        idx_pred = np.random.choice(len(X_sorted_pred), max_samples, replace=False)
+        idx_pred = np.sort(idx_pred)
+        D_pred = pairwise_distances(X_sorted_pred[idx_pred], metric='euclidean')
+        labels_plot_pred = labels_sorted_pred[idx_pred]
+    else:
+        D_true = pairwise_distances(X_sorted_true, metric='euclidean')
+        labels_plot_true = labels_sorted_true
+        D_pred = pairwise_distances(X_sorted_pred, metric='euclidean')
+        labels_plot_pred = labels_sorted_pred
+    
+    # Plot ground truth
+    im1 = axes[0].imshow(D_true, cmap='viridis', aspect='auto')
+    axes[0].set_title('Distance Matrix (Ground Truth Order)', fontsize=12, fontweight='bold')
+    axes[0].set_xlabel('Spike Index')
+    axes[0].set_ylabel('Spike Index')
+    
+    # Add cluster boundaries for ground truth
+    boundaries_true = np.where(np.diff(labels_plot_true))[0] + 0.5
+    for b in boundaries_true:
+        axes[0].axhline(b, color='red', linewidth=1.5, alpha=0.7)
+        axes[0].axvline(b, color='red', linewidth=1.5, alpha=0.7)
+    
+    plt.colorbar(im1, ax=axes[0], label='Euclidean Distance')
+    
+    # Plot predicted
+    im2 = axes[1].imshow(D_pred, cmap='viridis', aspect='auto')
+    axes[1].set_title('Distance Matrix (Predicted Order)', fontsize=12, fontweight='bold')
+    axes[1].set_xlabel('Spike Index')
+    axes[1].set_ylabel('Spike Index')
+    
+    # Add cluster boundaries for predicted
+    boundaries_pred = np.where(np.diff(labels_plot_pred))[0] + 0.5
+    for b in boundaries_pred:
+        axes[1].axhline(b, color='red', linewidth=1.5, alpha=0.7)
+        axes[1].axvline(b, color='red', linewidth=1.5, alpha=0.7)
+    
+    plt.colorbar(im2, ax=axes[1], label='Euclidean Distance')
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'distance_matrix_block_diagonal.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_performance_bars(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create bar charts comparing performance metrics across methods."""
+    
+    # Get top 10 method combinations by ARI
+    method_pairs = results_df.groupby(['dim_reduction_method', 'clustering_method']).agg({
+        'ari': 'mean',
+        'v_measure': 'mean',
+        'nmi': 'mean',
+        'silhouette': 'mean',
+    }).reset_index()
+    
+    method_pairs['method_combo'] = (method_pairs['dim_reduction_method'] + 
+                                     ' + ' + method_pairs['clustering_method'])
+    method_pairs = method_pairs.sort_values('ari', ascending=False).head(10)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Performance Metrics Comparison (Top 10 Method Combinations)', 
+                 fontsize=16, fontweight='bold')
+    
+    metrics = [('ari', 'Adjusted Rand Index', axes[0, 0]),
+               ('v_measure', 'V-Measure', axes[0, 1]),
+               ('nmi', 'Normalized Mutual Information', axes[1, 0]),
+               ('silhouette', 'Silhouette Score', axes[1, 1])]
+    
+    for metric, title, ax in metrics:
+        data = method_pairs.sort_values(metric, ascending=True)
+        colors = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(data)))
+        
+        bars = ax.barh(range(len(data)), data[metric], color=colors)
+        ax.set_yticks(range(len(data)))
+        ax.set_yticklabels(data['method_combo'], fontsize=9)
+        ax.set_xlabel(title, fontsize=11)
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.grid(axis='x', alpha=0.3)
+        
+        # Add value labels
+        for i, (bar, val) in enumerate(zip(bars, data[metric])):
+            if not np.isnan(val):
+                ax.text(val, i, f' {val:.3f}', va='center', fontsize=8)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'performance_metrics_bars.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_method_heatmap(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create heatmap of method performance."""
+    
+    # Pivot to get DR methods vs clustering methods
+    pivot = results_df.pivot_table(
+        values='ari',
+        index='dim_reduction_method',
+        columns='clustering_method',
+        aggfunc='mean'
+    )
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(pivot, annot=True, fmt='.3f', cmap='RdYlGn', 
+                center=0.5, vmin=0, vmax=1,
+                linewidths=0.5, cbar_kws={'label': 'Mean ARI'},
+                ax=ax)
+    ax.set_title('Mean ARI by Method Combination', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Clustering Method', fontsize=12)
+    ax.set_ylabel('Dimensionality Reduction', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'method_heatmap.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_timing_plots(timing_info: Dict[str, float], output_dir: Path) -> None:
+    """Create timing analysis plots."""
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Bar chart of timing
+    methods = list(timing_info.keys())
+    times = list(timing_info.values())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(methods)))
+    
+    axes[0].barh(methods, times, color=colors)
+    axes[0].set_xlabel('Time (seconds)', fontsize=11)
+    axes[0].set_title('Computation Time by Method Group', fontsize=12, fontweight='bold')
+    axes[0].grid(axis='x', alpha=0.3)
+    
+    for i, (method, time_val) in enumerate(zip(methods, times)):
+        axes[0].text(time_val, i, f' {time_val:.2f}s', va='center', fontsize=9)
+    
+    # Pie chart of time proportion
+    axes[1].pie(times, labels=methods, autopct='%1.1f%%', colors=colors, startangle=90)
+    axes[1].set_title('Computation Time Proportion', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'computation_timing.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_metrics_distribution(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create distribution plots for various metrics."""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Metrics Distribution Across All Experiments', fontsize=14, fontweight='bold')
+    
+    metrics = ['ari', 'v_measure', 'nmi', 'silhouette']
+    titles = ['ARI Distribution', 'V-Measure Distribution', 
+              'NMI Distribution', 'Silhouette Score Distribution']
+    
+    for ax, metric, title in zip(axes.flat, metrics, titles):
+        data = results_df[metric].dropna()
+        
+        if len(data) > 0:
+            ax.hist(data, bins=30, alpha=0.7, color='steelblue', edgecolor='black')
+            ax.axvline(data.mean(), color='red', linestyle='--', linewidth=2, 
+                      label=f'Mean: {data.mean():.3f}')
+            ax.axvline(data.median(), color='green', linestyle='--', linewidth=2,
+                      label=f'Median: {data.median():.3f}')
+            ax.set_xlabel(metric.upper(), fontsize=11)
+            ax.set_ylabel('Frequency', fontsize=11)
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            ax.legend()
+            ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'metrics_distribution.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_correlation_scatter(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create scatter plots showing correlation between supervised and unsupervised metrics."""
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle('Supervised vs Unsupervised Metrics Correlation', 
+                 fontsize=14, fontweight='bold')
+    
+    unsupervised = [('silhouette', 'Silhouette Score'),
+                    ('davies_bouldin', 'Davies-Bouldin Index'),
+                    ('calinski_harabasz', 'Calinski-Harabasz Index')]
+    
+    for ax, (metric, label) in zip(axes, unsupervised):
+        data = results_df[['ari', metric]].dropna()
+        
+        if len(data) > 5:
+            ax.scatter(data[metric], data['ari'], alpha=0.5, s=30)
+            
+            # Add trend line
+            z = np.polyfit(data[metric], data['ari'], 1)
+            p = np.poly1d(z)
+            x_line = np.linspace(data[metric].min(), data[metric].max(), 100)
+            ax.plot(x_line, p(x_line), "r--", alpha=0.8, linewidth=2)
+            
+            # Calculate correlation
+            corr = data['ari'].corr(data[metric])
+            ax.text(0.05, 0.95, f'Correlation: {corr:.3f}',
+                   transform=ax.transAxes, fontsize=10,
+                   verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            ax.set_xlabel(label, fontsize=11)
+            ax.set_ylabel('ARI', fontsize=11)
+            ax.set_title(f'ARI vs {label}', fontsize=12, fontweight='bold')
+            ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'metrics_correlation.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 if __name__ == "__main__":

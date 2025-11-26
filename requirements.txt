@@ -9,6 +9,10 @@ scikit-learn>=1.0.0
 # Dimensionality Reduction
 umap-learn>=0.5.0
 spikeinterface>=0.103.0
+phate>=1.0.10
+trimap>=1.0.14
+pydiffmap>=0.1.2
+pyamg>=5.0.0
 
 # Deep Learning (optional, for Autoencoder/VAE/CEED/LFADS)
 torch>=1.10.0
