@@ -330,62 +330,85 @@ class KPCAReducer(DimensionalityReductionBase):
             print(f"KPCA failed: {str(e)}")
             return None
 
-
 class DiffusionMapsReducer(DimensionalityReductionBase):
-    """Diffusion Maps using pydiffmap library or custom implementation."""
-    
+    """
+    Numerically stable Diffusion Maps implementation.
+
+    Design principles:
+    - NEVER use ARPACK (unstable for graph Laplacians on spike manifolds)
+    - Prefer pydiffmap when available with data-scaled epsilon
+    - Fallback to SpectralEmbedding with:
+        * affinity = 'nearest_neighbors'
+        * solver = dense (small N) or LOBPCG (large N)
+    - Explicitly regularize X to break graph degeneracy
+    - Hard-cap n_components <= 5
+    """
+
     def fit_transform(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         try:
             def _fit():
-                # Try using pydiffmap if available, otherwise use a custom implementation
+                n_samples = X.shape[0]
+                if n_samples < 3:
+                    print(f"Warning: Too few samples ({n_samples}) for DiffusionMaps")
+                    return None
+
+                # ---- Hard numerical caps ----
+                n_components = min(self.params.get("n_components", 10), 5, n_samples - 2)
+                n_neighbors = min(self.params.get("n_neighbors", 10), n_samples - 1)
+                alpha = self.params.get("alpha", 0.5)
+
+                # ---- Explicit degeneracy breaking (critical) ----
+                X_reg = X + 1e-6 * np.random.standard_normal(X.shape)
+
+                # ==========================================================
+                # 1. Preferred Path: pydiffmap (Stable when epsilon scaled)
+                # ==========================================================
                 try:
                     from pydiffmap import diffusion_map as dm
-                    # Cap n_components at 5 to avoid convergence issues
-                    n_components = min(self.params.get('n_components', 10), 5)
-                    epsilon = self.params.get('epsilon', 'bgh')
-                    alpha = self.params.get('alpha', 0.5)
-                    
+
+                    # Data-scaled epsilon (NOT global heuristic)
+                    from sklearn.metrics import pairwise_distances
+                    sample_idx = np.random.choice(
+                        n_samples, size=min(2048, n_samples), replace=False
+                    )
+                    D = pairwise_distances(X_reg[sample_idx], metric="euclidean")
+                    eps = float(np.median(D[D > 0]) ** 2)
+                    eps = max(eps, 1e-6)
+
                     mydmap = dm.DiffusionMap.from_sklearn(
                         n_evecs=n_components,
-                        epsilon=epsilon,
-                        alpha=alpha
+                        epsilon=eps,
+                        alpha=alpha,
                     )
+
                     self.model = mydmap
-                    return mydmap.fit_transform(X)
+                    return mydmap.fit_transform(X_reg)
+
                 except ImportError:
-                    # Fallback: use Laplacian Eigenmaps as approximation with robust parameters
-                    n_samples = X.shape[0]
-                    n_components = min(self.params.get('n_components', 10), n_samples - 2, 5)  # Cap at 5
-                    n_neighbors = min(self.params.get('n_neighbors', 10), n_samples - 1)
-                    
-                    # Ensure n_components is valid
-                    if n_components < 2:
-                        print(f"Warning: Too few samples ({n_samples}) for DiffusionMaps, need at least 3")
-                        return None
-                    
-                    # Use dense solver for N <= 1000 to avoid ARPACK convergence issues
-                    eigen_solver = 'dense' if n_samples <= 1000 else 'arpack'
-                    
-                    params = {
-                        'n_components': n_components,
-                        'n_neighbors': n_neighbors,
-                        'affinity': 'rbf',
-                        'eigen_solver': eigen_solver,
-                        'n_jobs': 1,
-                    }
-                    
-                    # Add ARPACK-specific parameters for larger datasets
-                    if eigen_solver == 'arpack':
-                        params['eigen_tol'] = 1e-4
-                        params['max_iter'] = 2000
-                    
-                    self.model = SpectralEmbedding(**params)
-                    return self.model.fit_transform(X)
-            
+                    pass  # Fall back to spectral formulation
+
+                # ==========================================================
+                # 2. Stable Fallback: SpectralEmbedding (No ARPACK)
+                # ==========================================================
+                eigen_solver = "dense" if n_samples <= 1500 else "lobpcg"
+
+                params = {
+                    "n_components": n_components,
+                    "n_neighbors": n_neighbors,
+                    "affinity": "nearest_neighbors",  # CRITICAL
+                    "eigen_solver": eigen_solver,
+                    "n_jobs": 1,
+                }
+
+                self.model = SpectralEmbedding(**params)
+                return self.model.fit_transform(X_reg)
+
+            # ---- Performance tracking wrapper ----
             result, self.computation_time, self.memory_usage = self._track_performance(_fit)
             return self._validate_output(result)
+
         except Exception as e:
-            print(f"Diffusion Maps failed: {str(e)}")
+            print(f"Diffusion Maps failed (stable implementation): {str(e)}")
             return None
 
 
