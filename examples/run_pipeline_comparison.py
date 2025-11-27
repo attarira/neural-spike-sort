@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Tuple
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -1085,6 +1087,604 @@ def compute_unsupervised_correlations(df: pd.DataFrame) -> Dict[str, float]:
     return correlations
 
 
+def _create_single_dstar_heatmap(df: pd.DataFrame, d_star: int, output_dir: Path) -> None:
+    """Create heatmap for a single d_star value."""
+    df_clean = df.dropna(subset=['ari']).copy()
+    
+    if len(df_clean) == 0:
+        return
+    
+    # Calculate average ARI
+    avg_ari = df_clean.groupby(['dim_reduction_method', 'clustering_method']).agg({
+        'ari': ['mean', 'count']
+    }).reset_index()
+    avg_ari.columns = ['dim_reduction_method', 'clustering_method', 'mean_ari', 'n_configs']
+    
+    # Create pivot table
+    heatmap_data = avg_ari.pivot(
+        index='dim_reduction_method',
+        columns='clustering_method',
+        values='mean_ari'
+    )
+    
+    if heatmap_data.empty:
+        return
+    
+    # Sort by performance
+    row_means = heatmap_data.mean(axis=1, skipna=True).sort_values(ascending=False)
+    col_means = heatmap_data.mean(axis=0, skipna=True).sort_values(ascending=False)
+    heatmap_data = heatmap_data.loc[row_means.index, col_means.index]
+    
+    # Create heatmap
+    fig, ax = plt.subplots(figsize=(12, 10))
+    sns.heatmap(
+        heatmap_data, annot=True, fmt='.3f', cmap='RdYlGn',
+        center=0.3, vmin=0.0, vmax=0.6,
+        cbar_kws={'label': 'Average ARI'},
+        linewidths=0.5, linecolor='gray', ax=ax
+    )
+    ax.set_title(f'Average ARI by DR and Clustering Method\nd* = {d_star} (PCA dimensions)\n' +
+                 f'Overall Mean ARI: {df_clean["ari"].mean():.4f} | n={len(df_clean)} experiments',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Clustering Method', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Dimensionality Reduction Method', fontsize=12, fontweight='bold')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    
+    output_path = output_dir / f"heatmap_ari.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def _create_single_dstar_boxplots(df: pd.DataFrame, d_star: int, output_dir: Path) -> None:
+    """Create box plots for a single d_star value."""
+    df_clean = df.dropna(subset=['ari']).copy()
+    
+    if len(df_clean) == 0:
+        return
+    
+    sns.set_style("whitegrid")
+    
+    # 1. Box plot by DR method
+    fig, ax = plt.subplots(figsize=(14, 8))
+    dr_order = df_clean.groupby('dim_reduction_method')['ari'].median().sort_values(ascending=False).index.tolist()
+    
+    sns.boxplot(
+        data=df_clean, x='dim_reduction_method', y='ari',
+        order=dr_order, palette='Set2', ax=ax
+    )
+    
+    means = df_clean.groupby('dim_reduction_method')['ari'].mean()
+    positions = range(len(dr_order))
+    ax.scatter(positions, [means[method] for method in dr_order],
+               color='red', s=100, zorder=3, marker='D', label='Mean')
+    
+    ax.set_title(f'ARI Distribution by DR Method (d* = {d_star})',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Dimensionality Reduction Method', fontsize=12, fontweight='bold')
+    ax.set_ylabel('ARI', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df_clean['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = output_dir / "boxplot_by_dr_method.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 2. Box plot by clustering method
+    fig, ax = plt.subplots(figsize=(10, 8))
+    clust_order = df_clean.groupby('clustering_method')['ari'].median().sort_values(ascending=False).index.tolist()
+    
+    sns.boxplot(
+        data=df_clean, x='clustering_method', y='ari',
+        order=clust_order, palette='Set3', ax=ax
+    )
+    
+    means = df_clean.groupby('clustering_method')['ari'].mean()
+    positions = range(len(clust_order))
+    ax.scatter(positions, [means[method] for method in clust_order],
+               color='red', s=100, zorder=3, marker='D', label='Mean')
+    
+    ax.set_title(f'ARI Distribution by Clustering Method (d* = {d_star})',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Clustering Method', fontsize=12, fontweight='bold')
+    ax.set_ylabel('ARI', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df_clean['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = output_dir / "boxplot_by_clustering_method.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 3. Top combinations
+    df_clean['method_combo'] = df_clean['dim_reduction_method'] + ' + ' + df_clean['clustering_method']
+    combo_medians = df_clean.groupby('method_combo')['ari'].median().sort_values(ascending=False)
+    top_combos = combo_medians.head(10).index.tolist()
+    
+    df_top = df_clean[df_clean['method_combo'].isin(top_combos)].copy()
+    
+    fig, ax = plt.subplots(figsize=(14, 8))
+    sns.boxplot(
+        data=df_top, x='method_combo', y='ari',
+        order=top_combos, palette='husl', ax=ax
+    )
+    
+    means = df_top.groupby('method_combo')['ari'].mean()
+    positions = range(len(top_combos))
+    ax.scatter(positions, [means[combo] for combo in top_combos],
+               color='red', s=80, zorder=3, marker='D', label='Mean')
+    
+    ax.set_title(f'Top 10 Method Combinations (d* = {d_star})',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Method Combination', fontsize=12, fontweight='bold')
+    ax.set_ylabel('ARI', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df_clean['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = output_dir / "boxplot_top_combinations.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_performance_heatmaps(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create heatmaps showing ARI performance for DR + Clustering combinations.
+    
+    Creates:
+    1. Overall heatmap (all d_star values combined)
+    2. Separate heatmaps for each d_star value
+    3. Summary comparison plot across d_star values
+    
+    Args:
+        results_df: DataFrame with columns: dim_reduction_method, clustering_method, ari, d_star, etc.
+        output_dir: Directory to save visualizations
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    if results_df.empty or "ari" not in results_df.columns:
+        logger.warning("No valid results to create heatmaps")
+        return
+    
+    viz_dir = output_dir / "visualizations"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Filter valid results
+    df = results_df.dropna(subset=['ari']).copy()
+    
+    if len(df) == 0:
+        logger.warning("No valid ARI values to plot")
+        return
+    
+    print("\n[Heatmap Generation] Creating performance heatmaps...")
+    
+    # 1. Create overall heatmap (all d_star values)
+    print("  Creating overall heatmap (all d_star values combined)...")
+    avg_ari = df.groupby(['dim_reduction_method', 'clustering_method']).agg({
+        'ari': ['mean', 'std', 'count']
+    }).reset_index()
+    avg_ari.columns = ['dim_reduction_method', 'clustering_method', 'mean_ari', 'std_ari', 'n_configs']
+    
+    heatmap_data = avg_ari.pivot(
+        index='dim_reduction_method',
+        columns='clustering_method',
+        values='mean_ari'
+    )
+    
+    if not heatmap_data.empty:
+        # Sort by performance
+        row_means = heatmap_data.mean(axis=1, skipna=True).sort_values(ascending=False)
+        col_means = heatmap_data.mean(axis=0, skipna=True).sort_values(ascending=False)
+        heatmap_data = heatmap_data.loc[row_means.index, col_means.index]
+        
+        fig, ax = plt.subplots(figsize=(12, 10))
+        sns.heatmap(
+            heatmap_data, annot=True, fmt='.3f', cmap='RdYlGn',
+            center=0.3, vmin=0.0, vmax=0.6,
+            cbar_kws={'label': 'Average ARI'},
+            linewidths=0.5, linecolor='gray', ax=ax
+        )
+        ax.set_title('Average ARI by DR and Clustering Method\n(Across all d_star values and hyperparameters)',
+                     fontsize=14, fontweight='bold', pad=20)
+        ax.set_xlabel('Clustering Method', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Dimensionality Reduction Method', fontsize=12, fontweight='bold')
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
+        plt.tight_layout()
+        
+        output_path = viz_dir / "ari_heatmap_overall.png"
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"    ✓ Saved to: {output_path.name}")
+        plt.close()
+    
+    # 2. Create per-d_star heatmaps
+    if 'd_star' in df.columns:
+        d_star_values = sorted(df['d_star'].dropna().unique())
+        
+        if len(d_star_values) > 1:
+            print(f"  Creating separate heatmaps for {len(d_star_values)} d_star values: {d_star_values}")
+            
+            dstar_dir = viz_dir / "dstar_heatmaps"
+            dstar_dir.mkdir(parents=True, exist_ok=True)
+            
+            summary_stats = []
+            
+            for d_star in d_star_values:
+                df_dstar = df[df['d_star'] == d_star].copy()
+                
+                if len(df_dstar) == 0:
+                    continue
+                
+                avg_ari_dstar = df_dstar.groupby(['dim_reduction_method', 'clustering_method']).agg({
+                    'ari': ['mean', 'std', 'count']
+                }).reset_index()
+                avg_ari_dstar.columns = ['dim_reduction_method', 'clustering_method', 'mean_ari', 'std_ari', 'n_configs']
+                
+                heatmap_dstar = avg_ari_dstar.pivot(
+                    index='dim_reduction_method',
+                    columns='clustering_method',
+                    values='mean_ari'
+                )
+                
+                if heatmap_dstar.empty:
+                    continue
+                
+                # Sort by performance
+                row_means_dstar = heatmap_dstar.mean(axis=1, skipna=True).sort_values(ascending=False)
+                col_means_dstar = heatmap_dstar.mean(axis=0, skipna=True).sort_values(ascending=False)
+                heatmap_dstar = heatmap_dstar.loc[row_means_dstar.index, col_means_dstar.index]
+                
+                # Store summary
+                best_combo = avg_ari_dstar.loc[avg_ari_dstar['mean_ari'].idxmax()]
+                summary_stats.append({
+                    'd_star': d_star,
+                    'n_results': len(df_dstar),
+                    'best_dr': best_combo['dim_reduction_method'],
+                    'best_clustering': best_combo['clustering_method'],
+                    'best_ari': best_combo['mean_ari'],
+                    'overall_mean_ari': df_dstar['ari'].mean()
+                })
+                
+                # Create heatmap
+                fig, ax = plt.subplots(figsize=(12, 10))
+                sns.heatmap(
+                    heatmap_dstar, annot=True, fmt='.3f', cmap='RdYlGn',
+                    center=0.3, vmin=0.0, vmax=0.6,
+                    cbar_kws={'label': 'Average ARI'},
+                    linewidths=0.5, linecolor='gray', ax=ax
+                )
+                ax.set_title(f'Average ARI by DR and Clustering Method\nd* = {int(d_star)} (PCA dimensions)\n' +
+                             f'Overall Mean ARI: {df_dstar["ari"].mean():.4f} | n={len(df_dstar)} experiments',
+                             fontsize=14, fontweight='bold', pad=20)
+                ax.set_xlabel('Clustering Method', fontsize=12, fontweight='bold')
+                ax.set_ylabel('Dimensionality Reduction Method', fontsize=12, fontweight='bold')
+                plt.xticks(rotation=45, ha='right')
+                plt.yticks(rotation=0)
+                plt.tight_layout()
+                
+                output_path = dstar_dir / f"ari_heatmap_dstar{int(d_star)}.png"
+                plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                plt.close()
+            
+            print(f"    ✓ Created {len(d_star_values)} d_star-specific heatmaps in: {dstar_dir.name}/")
+            
+            # 3. Create summary comparison plot
+            if len(summary_stats) > 1:
+                summary_df = pd.DataFrame(summary_stats).sort_values('d_star')
+                
+                fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+                
+                # Plot 1: Overall mean ARI vs d_star
+                ax1 = axes[0]
+                ax1.plot(summary_df['d_star'], summary_df['overall_mean_ari'],
+                        marker='o', linewidth=2, markersize=10, color='steelblue')
+                ax1.set_xlabel('d* (PCA Dimensions)', fontsize=12, fontweight='bold')
+                ax1.set_ylabel('Overall Mean ARI', fontsize=12, fontweight='bold')
+                ax1.set_title('Overall Performance vs Intrinsic Dimensionality',
+                             fontsize=13, fontweight='bold')
+                ax1.grid(True, alpha=0.3)
+                
+                # Annotate best d_star
+                best_idx = summary_df['overall_mean_ari'].idxmax()
+                best_row = summary_df.loc[best_idx]
+                ax1.annotate(f"Best: d*={int(best_row['d_star'])}\nARI={best_row['overall_mean_ari']:.4f}",
+                            xy=(best_row['d_star'], best_row['overall_mean_ari']),
+                            xytext=(20, 20), textcoords='offset points',
+                            bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+                            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+                
+                # Plot 2: Best method combinations per d_star
+                ax2 = axes[1]
+                bars = ax2.bar(range(len(summary_df)), summary_df['best_ari'],
+                              color='lightgreen', edgecolor='darkgreen', linewidth=2)
+                ax2.set_xticks(range(len(summary_df)))
+                ax2.set_xticklabels([f"d*={int(d)}" for d in summary_df['d_star']])
+                ax2.set_xlabel('d* (PCA Dimensions)', fontsize=12, fontweight='bold')
+                ax2.set_ylabel('Best ARI', fontsize=12, fontweight='bold')
+                ax2.set_title('Best Method Combination at Each d*', fontsize=13, fontweight='bold')
+                ax2.grid(True, alpha=0.3, axis='y')
+                
+                # Add labels on bars
+                for i, (bar, row) in enumerate(zip(bars, summary_df.itertuples())):
+                    height = bar.get_height()
+                    label = f"{row.best_dr}\n+\n{row.best_clustering}"
+                    ax2.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                            f'{height:.3f}\n{label}',
+                            ha='center', va='bottom', fontsize=8, fontweight='bold')
+                
+                plt.tight_layout()
+                
+                summary_path = dstar_dir / "dstar_comparison_summary.png"
+                plt.savefig(summary_path, dpi=300, bbox_inches='tight')
+                print(f"    ✓ Summary comparison saved to: {dstar_dir.name}/{summary_path.name}")
+                plt.close()
+                
+                # Save stats to CSV
+                summary_csv = dstar_dir / "dstar_summary_stats.csv"
+                summary_df.to_csv(summary_csv, index=False)
+    
+    print("  ✓ Heatmap generation complete!")
+
+
+def create_performance_boxplots(results_df: pd.DataFrame, output_dir: Path) -> None:
+    """Create box plots showing ARI distribution for different method combinations.
+    
+    Creates:
+    1. Box plots by dimensionality reduction method
+    2. Box plots by clustering method
+    3. Box plots by (DR, Clustering) combinations (top methods only)
+    4. Box plots per d_star value (if multiple d_star tested)
+    
+    Args:
+        results_df: DataFrame with columns: dim_reduction_method, clustering_method, ari, d_star, etc.
+        output_dir: Directory to save visualizations
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    if results_df.empty or "ari" not in results_df.columns:
+        logger.warning("No valid results to create box plots")
+        return
+    
+    viz_dir = output_dir / "visualizations"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Filter valid results
+    df = results_df.dropna(subset=['ari']).copy()
+    
+    if len(df) == 0:
+        logger.warning("No valid ARI values to plot")
+        return
+    
+    print("\n[Box Plot Generation] Creating performance box plots...")
+    
+    # Set seaborn style
+    sns.set_style("whitegrid")
+    
+    # 1. Box plots by Dimensionality Reduction method
+    print("  Creating box plots by DR method...")
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Sort by median ARI
+    dr_order = df.groupby('dim_reduction_method')['ari'].median().sort_values(ascending=False).index.tolist()
+    
+    sns.boxplot(
+        data=df, x='dim_reduction_method', y='ari',
+        order=dr_order, palette='Set2', ax=ax
+    )
+    
+    # Add mean markers
+    means = df.groupby('dim_reduction_method')['ari'].mean()
+    positions = range(len(dr_order))
+    ax.scatter(positions, [means[method] for method in dr_order], 
+               color='red', s=100, zorder=3, marker='D', label='Mean')
+    
+    ax.set_title('ARI Distribution by Dimensionality Reduction Method\n(Box: IQR, Line: Median, Diamond: Mean)',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Dimensionality Reduction Method', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Adjusted Rand Index (ARI)', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = viz_dir / "boxplot_by_dr_method.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"    ✓ Saved to: {output_path.name}")
+    plt.close()
+    
+    # 2. Box plots by Clustering method
+    print("  Creating box plots by clustering method...")
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Sort by median ARI
+    clust_order = df.groupby('clustering_method')['ari'].median().sort_values(ascending=False).index.tolist()
+    
+    sns.boxplot(
+        data=df, x='clustering_method', y='ari',
+        order=clust_order, palette='Set3', ax=ax
+    )
+    
+    # Add mean markers
+    means = df.groupby('clustering_method')['ari'].mean()
+    positions = range(len(clust_order))
+    ax.scatter(positions, [means[method] for method in clust_order],
+               color='red', s=100, zorder=3, marker='D', label='Mean')
+    
+    ax.set_title('ARI Distribution by Clustering Method\n(Box: IQR, Line: Median, Diamond: Mean)',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Clustering Method', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Adjusted Rand Index (ARI)', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = viz_dir / "boxplot_by_clustering_method.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"    ✓ Saved to: {output_path.name}")
+    plt.close()
+    
+    # 3. Box plots for top method combinations
+    print("  Creating box plots for top method combinations...")
+    
+    # Get top 15 combinations by median ARI
+    df['method_combo'] = df['dim_reduction_method'] + ' + ' + df['clustering_method']
+    combo_medians = df.groupby('method_combo')['ari'].median().sort_values(ascending=False)
+    top_combos = combo_medians.head(15).index.tolist()
+    
+    df_top = df[df['method_combo'].isin(top_combos)].copy()
+    
+    fig, ax = plt.subplots(figsize=(16, 10))
+    
+    sns.boxplot(
+        data=df_top, x='method_combo', y='ari',
+        order=top_combos, palette='husl', ax=ax
+    )
+    
+    # Add mean markers
+    means = df_top.groupby('method_combo')['ari'].mean()
+    positions = range(len(top_combos))
+    ax.scatter(positions, [means[combo] for combo in top_combos],
+               color='red', s=80, zorder=3, marker='D', label='Mean')
+    
+    ax.set_title('ARI Distribution for Top 15 Method Combinations\n(Ranked by Median ARI)',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Method Combination', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Adjusted Rand Index (ARI)', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = viz_dir / "boxplot_top_combinations.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"    ✓ Saved to: {output_path.name}")
+    plt.close()
+    
+    # 4. Box plots per d_star (if multiple d_star values)
+    if 'd_star' in df.columns:
+        d_star_values = sorted(df['d_star'].dropna().unique())
+        
+        if len(d_star_values) > 1:
+            print(f"  Creating box plots comparing d_star values...")
+            
+            dstar_dir = viz_dir / "dstar_heatmaps"
+            dstar_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Overall comparison across d_star
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            sns.boxplot(
+                data=df, x='d_star', y='ari',
+                palette='coolwarm', ax=ax
+            )
+            
+            # Add mean markers
+            means = df.groupby('d_star')['ari'].mean()
+            positions = range(len(d_star_values))
+            ax.scatter(positions, [means[d] for d in d_star_values],
+                       color='red', s=150, zorder=3, marker='D', label='Mean')
+            
+            # Add counts
+            counts = df.groupby('d_star').size()
+            for i, d_star in enumerate(d_star_values):
+                ax.text(i, df['ari'].max() + 0.02, f'n={counts[d_star]}',
+                       ha='center', fontsize=10, fontweight='bold')
+            
+            ax.set_title('ARI Distribution Across d* Values\n(Intrinsic Dimensionality)',
+                         fontsize=14, fontweight='bold', pad=20)
+            ax.set_xlabel('d* (PCA Dimensions)', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Adjusted Rand Index (ARI)', fontsize=12, fontweight='bold')
+            ax.set_ylim(-0.05, df['ari'].max() + 0.08)
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+            plt.tight_layout()
+            
+            output_path = dstar_dir / "boxplot_by_dstar.png"
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"    ✓ Saved to: {dstar_dir.name}/{output_path.name}")
+            plt.close()
+            
+            # Box plots for top DR methods at each d_star
+            fig, axes = plt.subplots(1, len(d_star_values), figsize=(8*len(d_star_values), 8), sharey=True)
+            
+            if len(d_star_values) == 1:
+                axes = [axes]
+            
+            for idx, d_star in enumerate(d_star_values):
+                ax = axes[idx]
+                df_dstar = df[df['d_star'] == d_star].copy()
+                
+                # Get top 10 DR methods at this d_star
+                dr_medians = df_dstar.groupby('dim_reduction_method')['ari'].median().sort_values(ascending=False)
+                top_dr = dr_medians.head(10).index.tolist()
+                
+                df_dstar_top = df_dstar[df_dstar['dim_reduction_method'].isin(top_dr)].copy()
+                
+                sns.boxplot(
+                    data=df_dstar_top, x='dim_reduction_method', y='ari',
+                    order=top_dr, palette='Set2', ax=ax
+                )
+                
+                ax.set_title(f'd* = {int(d_star)}\n(n={len(df_dstar)} experiments)',
+                            fontsize=12, fontweight='bold')
+                ax.set_xlabel('DR Method', fontsize=11, fontweight='bold')
+                if idx == 0:
+                    ax.set_ylabel('ARI', fontsize=11, fontweight='bold')
+                else:
+                    ax.set_ylabel('')
+                ax.tick_params(axis='x', rotation=45)
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+                ax.grid(True, alpha=0.3, axis='y')
+            
+            fig.suptitle('Top DR Methods by d* Value', fontsize=14, fontweight='bold', y=1.02)
+            plt.tight_layout()
+            
+            output_path = dstar_dir / "boxplot_dr_by_dstar.png"
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"    ✓ Saved to: {dstar_dir.name}/{output_path.name}")
+            plt.close()
+    
+    # 5. Violin plots for better distribution visualization (bonus!)
+    print("  Creating violin plots for top combinations...")
+    
+    fig, ax = plt.subplots(figsize=(16, 10))
+    
+    sns.violinplot(
+        data=df_top, x='method_combo', y='ari',
+        order=top_combos, palette='muted', ax=ax,
+        inner='box'  # Show box plot inside violin
+    )
+    
+    ax.set_title('ARI Distribution for Top 15 Method Combinations\n(Violin plot shows full distribution)',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel('Method Combination', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Adjusted Rand Index (ARI)', fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.05, df['ari'].max() + 0.05)
+    plt.xticks(rotation=45, ha='right')
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    output_path = viz_dir / "violinplot_top_combinations.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"    ✓ Saved to: {output_path.name}")
+    plt.close()
+    
+    print("  ✓ Box plot generation complete!")
+
+
 def main() -> None:
     args = parse_args()
     seeds = args.seeds if args.seeds else [args.base_seed + i for i in range(args.num_datasets)]
@@ -1256,6 +1856,37 @@ def main() -> None:
                             "n_experiments": len(aris),
                         })
             
+            # Generate visualizations for this d_star immediately after experiments complete
+            if experiment_results:
+                try:
+                    # Convert current results to DataFrame
+                    current_results_df = pd.DataFrame(all_results)
+                    
+                    # Create heatmap and box plots for this specific d_star
+                    print(f"\n   [Visualization] Generating heatmaps and box plots for d_star={train_data['d_star']}...")
+                    
+                    # Filter to only this d_star
+                    dstar_results = current_results_df[
+                        current_results_df['d_star'] == train_data['d_star']
+                    ].copy()
+                    
+                    if not dstar_results.empty and 'ari' in dstar_results.columns:
+                        # Create a specific output directory for this d_star
+                        dstar_viz_dir = output_dir / "visualizations" / f"dstar_{train_data['d_star']}"
+                        dstar_viz_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # Generate heatmap for this d_star
+                        _create_single_dstar_heatmap(dstar_results, train_data['d_star'], dstar_viz_dir)
+                        
+                        # Generate box plots for this d_star  
+                        _create_single_dstar_boxplots(dstar_results, train_data['d_star'], dstar_viz_dir)
+                        
+                        print(f"   ✓ Visualizations saved to: visualizations/dstar_{train_data['d_star']}/")
+                
+                except Exception as e:
+                    import logging
+                    logging.warning(f"Incremental visualization failed for d_star={train_data['d_star']}: {e}")
+            
             # Document skipped configurations as failures
             for skipped in skipped_dr_configs:
                 # Only document if the method is in enabled_methods
@@ -1421,6 +2052,22 @@ def main() -> None:
         except Exception as e:
             import logging
             logging.warning(f"Visualization failed: {e}")
+    
+    # Create performance heatmaps
+    if not results_df.empty:
+        try:
+            create_performance_heatmaps(results_df, output_dir)
+        except Exception as e:
+            import logging
+            logging.warning(f"Heatmap generation failed: {e}")
+    
+    # Create performance box plots
+    if not results_df.empty:
+        try:
+            create_performance_boxplots(results_df, output_dir)
+        except Exception as e:
+            import logging
+            logging.warning(f"Box plot generation failed: {e}")
 
 
 if __name__ == "__main__":
