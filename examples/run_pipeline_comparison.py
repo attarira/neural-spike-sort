@@ -1235,6 +1235,159 @@ def _create_single_dstar_boxplots(df: pd.DataFrame, d_star: int, output_dir: Pat
     plt.close()
 
 
+def create_distance_matrix_visualization(
+    X_data: np.ndarray,
+    y_true: Optional[np.ndarray],
+    results: List[Dict[str, Any]],
+    output_dir: Path,
+    d_star: Optional[int] = None,
+    max_samples: int = 500
+) -> None:
+    """Create distance matrix visualization for the best performing method.
+    
+    Shows pairwise distances ordered by cluster labels to reveal block diagonal structure.
+    
+    Args:
+        X_data: Feature matrix (n_samples, n_features) - should be PCA-reduced data
+        y_true: Ground truth labels (optional, for comparison)
+        results: List of experiment results
+        output_dir: Directory to save visualization
+        d_star: d_star value for title (optional)
+        max_samples: Maximum samples to visualize (for performance)
+    """
+    from spike_sort.dimensionality_reduction import create_reducer
+    from spike_sort.clustering import create_clustering
+    
+    # Find best method by mean ARI
+    successful_results = [r for r in results if r.get('success') and r.get('evaluation')]
+    
+    if not successful_results:
+        print("    No successful results for distance matrix visualization")
+        return
+    
+    # Get method with best mean ARI
+    method_aris = {}
+    for result in successful_results:
+        if 'adjusted_rand_index' not in result.get('evaluation', {}):
+            continue
+        
+        key = (result['dim_reduction_method'], result['clustering_method'],
+               str(result.get('dim_reduction_params', {})), str(result.get('clustering_params', {})))
+        
+        if key not in method_aris:
+            method_aris[key] = []
+        method_aris[key].append(result['evaluation']['adjusted_rand_index'])
+    
+    if not method_aris:
+        print("    No ARI values available for distance matrix visualization")
+        return
+    
+    # Find method with best mean ARI
+    best_method = max(method_aris.items(), key=lambda x: np.mean(x[1]))
+    dr_method, clust_method, dr_params_str, clust_params_str = best_method[0]
+    mean_ari = np.mean(best_method[1])
+    
+    # Parse parameters
+    import json
+    try:
+        dr_params = json.loads(dr_params_str.replace("'", '"'))
+        clust_params = json.loads(clust_params_str.replace("'", '"'))
+    except:
+        dr_params = {}
+        clust_params = {}
+    
+    print(f"    Creating distance matrix for: {dr_method} + {clust_method} (ARI: {mean_ari:.4f})")
+    
+    # Subsample if needed
+    if len(X_data) > max_samples:
+        idx = np.random.choice(len(X_data), max_samples, replace=False)
+        X_subset = X_data[idx]
+        y_subset = y_true[idx] if y_true is not None else None
+    else:
+        X_subset = X_data
+        y_subset = y_true
+    
+    # Run the best method
+    reducer = create_reducer(dr_method, **dr_params)
+    if reducer is None:
+        return
+    
+    X_reduced = reducer.fit_transform(X_subset, y_subset)
+    if X_reduced is None:
+        return
+    
+    clusterer = create_clustering(clust_method, **clust_params)
+    if clusterer is None:
+        return
+    
+    labels_pred = clusterer.fit_predict(X_reduced)
+    if labels_pred is None:
+        return
+    
+    # Compute pairwise distance matrix
+    from sklearn.metrics import pairwise_distances
+    dist_matrix = pairwise_distances(X_reduced, metric='euclidean')
+    
+    # Create figure with 2 subplots (removed histogram panel)
+    if y_subset is not None:
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    else:
+        fig, axes = plt.subplots(1, 1, figsize=(10, 8))
+        axes = [axes]
+    
+    # 1. Distance matrix ordered by predicted clusters
+    ax1 = axes[0]
+    order_pred = np.argsort(labels_pred)
+    dist_ordered_pred = dist_matrix[order_pred][:, order_pred]
+    
+    im1 = ax1.imshow(dist_ordered_pred, cmap='viridis', aspect='auto', interpolation='nearest')
+    ax1.set_title(f'Distance Matrix (Predicted Clusters)\n{dr_method} + {clust_method}\nARI: {mean_ari:.3f}',
+                  fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Sample Index (ordered by predicted cluster)', fontsize=11)
+    ax1.set_ylabel('Sample Index (ordered by predicted cluster)', fontsize=11)
+    plt.colorbar(im1, ax=ax1, label='Euclidean Distance')
+    
+    # Add cluster boundaries
+    unique_labels = np.unique(labels_pred[order_pred])
+    boundaries = []
+    for label in unique_labels[:-1]:
+        boundary = np.where(labels_pred[order_pred] == label)[0][-1] + 0.5
+        boundaries.append(boundary)
+        ax1.axhline(boundary, color='red', linewidth=1, alpha=0.5)
+        ax1.axvline(boundary, color='red', linewidth=1, alpha=0.5)
+    
+    # 2. Distance matrix ordered by ground truth (if available)
+    if y_subset is not None:
+        ax2 = axes[1]
+        order_true = np.argsort(y_subset)
+        dist_ordered_true = dist_matrix[order_true][:, order_true]
+        
+        im2 = ax2.imshow(dist_ordered_true, cmap='viridis', aspect='auto', interpolation='nearest')
+        ax2.set_title(f'Distance Matrix (Ground Truth Clusters)\nTrue Labels',
+                      fontsize=12, fontweight='bold')
+        ax2.set_xlabel('Sample Index (ordered by true cluster)', fontsize=11)
+        ax2.set_ylabel('Sample Index (ordered by true cluster)', fontsize=11)
+        plt.colorbar(im2, ax=ax2, label='Euclidean Distance')
+        
+        # Add true cluster boundaries
+        unique_true = np.unique(y_subset[order_true])
+        for label in unique_true[:-1]:
+            boundary = np.where(y_subset[order_true] == label)[0][-1] + 0.5
+            ax2.axhline(boundary, color='red', linewidth=1, alpha=0.5)
+            ax2.axvline(boundary, color='red', linewidth=1, alpha=0.5)
+    
+    title_suffix = f" (d* = {d_star})" if d_star is not None else ""
+    fig.suptitle(f'Distance Matrix Analysis - Best Method{title_suffix}', 
+                 fontsize=14, fontweight='bold', y=0.98)
+    
+    plt.tight_layout()
+    
+    output_path = output_dir / "distance_matrix_best_method.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"    ✓ Saved to: {output_path.name}")
+    plt.close()
+
+
 def create_performance_heatmaps(results_df: pd.DataFrame, output_dir: Path) -> None:
     """Create heatmaps showing ARI performance for DR + Clustering combinations.
     
@@ -1881,6 +2034,18 @@ def main() -> None:
                         # Generate box plots for this d_star  
                         _create_single_dstar_boxplots(dstar_results, train_data['d_star'], dstar_viz_dir)
                         
+                        # Generate distance matrix for best method
+                        # Filter results list to this d_star
+                        dstar_result_list = [r for r in all_results if r.get('d_star') == train_data['d_star']]
+                        create_distance_matrix_visualization(
+                            X_data=train_data['X_pca'],
+                            y_true=train_data['labels'],
+                            results=dstar_result_list,
+                            output_dir=dstar_viz_dir,
+                            d_star=train_data['d_star'],
+                            max_samples=500
+                        )
+                        
                         print(f"   ✓ Visualizations saved to: visualizations/dstar_{train_data['d_star']}/")
                 
                 except Exception as e:
@@ -2068,6 +2233,22 @@ def main() -> None:
         except Exception as e:
             import logging
             logging.warning(f"Box plot generation failed: {e}")
+    
+    # Create distance matrix for overall best method
+    if last_X_pca is not None and len(all_results) > 0:
+        try:
+            print("\n[Distance Matrix] Creating visualization for overall best method...")
+            create_distance_matrix_visualization(
+                X_data=last_X_pca,
+                y_true=last_labels,
+                results=all_results,
+                output_dir=output_dir / "visualizations",
+                d_star=None,  # Overall, not specific to d_star
+                max_samples=500
+            )
+        except Exception as e:
+            import logging
+            logging.warning(f"Distance matrix visualization failed: {e}")
 
 
 if __name__ == "__main__":
