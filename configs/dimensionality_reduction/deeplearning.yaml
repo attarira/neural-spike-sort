@@ -21,8 +21,8 @@ dimensionality_reduction:
       epochs: 50
       batch_size: 32
       learning_rate: 0.001
-  # CEED is a supervised method - requires ground truth labels (y)
-  CEED:
+  # Contrastive Auto-Encoder is a supervised method - requires ground truth labels (y)
+  ContrastiveAutoEncoder:
     - encoding_dim: 10
       hidden_dim: 64
       epochs: 50

@@ -200,12 +200,8 @@ class ExperimentRunner:
                 failed_dr_configs.append((dim_method, dim_params, "Dimensionality reduction failed (returned None)"))
                 continue
             
-            # Cache test_indices for deep learning methods (to handle train/test splits)
-            test_indices = getattr(reducer, 'test_indices', None)
-            
             embeddings_cache[key] = {
                 'X_reduced': X_reduced,
-                'test_indices': test_indices,  # Store test indices for alignment
                 'metadata': reducer.get_metadata(),
                 'reduced_shape': X_reduced.shape,
                 'dim_method': dim_method,
@@ -273,22 +269,13 @@ class ExperimentRunner:
                 return base
             try:
                 X_reduced = cache['X_reduced']
-                test_indices = cache.get('test_indices', None)  # Retrieve test indices from cache
                 params = dict(exp['clust_params'])
                 method = exp['clust_method']
                 n_samples = X_reduced.shape[0]
                 n_features = X_reduced.shape[1]
                 
-                # Handle train/test split for deep learning methods
+                # Use ground truth labels for evaluation
                 y_eval = y
-                if test_indices is not None:
-                    base['used_train_test_split'] = True
-                    base['test_size'] = len(test_indices)
-                    base['train_size'] = len(X) - len(test_indices)
-                    if y is not None:
-                        y_eval = y[test_indices]
-                else:
-                    base['used_train_test_split'] = False
                 if method in ('HMM',):
                     if n_features > 64 or params.get('n_components', 1) > max(50, n_samples // 10):
                         base['error'] = 'HMM skipped due to high dimensionality/too many components'

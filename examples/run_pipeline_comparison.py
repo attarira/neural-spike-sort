@@ -64,7 +64,7 @@ DR_GROUPS: Dict[str, Set[str]] = {
         "TSNE",
         "UMAP",
     },
-    "deeplearning": {"Autoencoder", "VAE", "CEED"},
+    "deeplearning": {"Autoencoder", "VAE", "ContrastiveAutoEncoder"},
 }
 
 
@@ -545,7 +545,7 @@ def create_dimensionality_grid(
         for epochs in deep_epochs
     ]
     if include_supervised:
-        config["CEED"] = [
+        config["ContrastiveAutoEncoder"] = [
             {
                 "encoding_dim": encoding_dim,
                 "hidden_dim": hidden_dim,

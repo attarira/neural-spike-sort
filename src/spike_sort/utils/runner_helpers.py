@@ -435,7 +435,7 @@ def visualize_best_clusters(
     if reducer is None:
         return None
     
-    # Pass ground truth labels for supervised methods (e.g., CEED)
+    # Pass ground truth labels for supervised methods (e.g., ContrastiveAutoEncoder)
     X_reduced = reducer.fit_transform(X, y)
     if X_reduced is None:
         return None

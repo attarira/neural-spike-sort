@@ -10,7 +10,7 @@ scikit-learn>=1.0.0
 umap-learn>=0.5.0
 spikeinterface>=0.103.0
 
-# Deep Learning (optional, for Autoencoder/VAE/CEED/LFADS)
+# Deep Learning (optional, for Autoencoder/VAE/ContrastiveAutoEncoder/LFADS)
 torch>=1.10.0
 
 # Clustering (optional)

@@ -9,7 +9,7 @@ Members: Muhammad, Ryan, Rayaan
 
 - **Unified Interface**: Clean, extensible base classes for all methods
 - **Comprehensive Methods**: 
-  - **10 Dimensionality Reduction Methods**: Linear (PCA, ICA), Manifold (t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE), Deep Learning (Autoencoder, VAE, CEED)
+  - **10 Dimensionality Reduction Methods**: Linear (PCA, ICA), Manifold (t-SNE, UMAP, Isomap, Laplacian Eigenmaps, LLE), Deep Learning (Autoencoder, VAE, Contrastive Auto-Encoder)
   - **9 Clustering Methods**: K-Means, GMM, DBSCAN, Spectral, Dirichlet Process, HMM, Agglomerative, OPTICS, Mean Shift
 - **Robust Evaluation**: Multiple metrics with and without ground truth
 - **Parallel Execution**: Support for multiprocessing to speed up experiments
@@ -146,7 +146,7 @@ clustering:
 #### Deep Learning Methods
 8. **Autoencoder** - Neural network that learns compressed representations of spike waveforms through reconstruction
 9. **VAE** (Variational Autoencoder) - Probabilistic autoencoder that learns a smooth latent space of spike features with uncertainty quantification
-10. **CEED** (Contrastive Encoder for Event Detection) - **Supervised method** that uses contrastive learning to learn discriminative spike representations (requires ground truth labels)
+10. **Contrastive Auto-Encoder** - **Supervised method** that uses contrastive learning to learn discriminative spike representations (requires ground truth labels)
 
 #### Methods Not Applicable to Spike Waveforms (Commented Out)
 - **CCA** (Canonical Correlation Analysis) - Requires two data views/modalities
@@ -257,7 +257,7 @@ results/
 ### Import Errors
 If you encounter import errors for optional dependencies:
 - **UMAP**: `pip install umap-learn`
-- **PyTorch** (for Autoencoder, VAE, CEED, LFADS): `pip install torch`
+- **PyTorch** (for Autoencoder, VAE, Contrastive Auto-Encoder, LFADS): `pip install torch`
 - **HMMlearn**: `pip install hmmlearn`
 - **GPFA**: `pip install elephant quantities neo`
 - **Slice TCA**: `pip install tensorly`
