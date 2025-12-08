@@ -44,6 +44,7 @@ from spike_sort.utils.runner_helpers import (
     prepare_spike_features,
     slice_recording,
     visualize_best_clusters,
+    visualize_all_best_combinations,
 )
 
 # Mapping from high-level DR groups requested by the user to the concrete reducer names
@@ -2217,6 +2218,24 @@ def main() -> None:
         except Exception as e:
             import logging
             logging.warning(f"Visualization failed: {e}")
+    
+    # Visualize best configuration for each DR+CL combination
+    if last_X_pca is not None and len(all_results) > 0:
+        try:
+            if has_deeplearning:
+                print(f"\n[Visualization] Creating plots for each best DR+CL combination using complete dataset: {last_X_pca.shape[0]} samples")
+            visualize_all_best_combinations(
+                X=last_X_pca,
+                y=last_labels if last_labels is not None else None,
+                results=all_results,
+                output_dir=output_dir / "visualizations",
+                max_points=50000,
+                plot_3d=False,  # Set to False to save time/space, change to True if needed
+                use_mean_ari=True,
+            )
+        except Exception as e:
+            import logging
+            logging.warning(f"Combination visualization failed: {e}")
     
     # Create performance heatmaps
     if not results_df.empty:

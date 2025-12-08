@@ -343,6 +343,60 @@ def _find_best_config_by_mean_ari(results: List[Dict[str, Any]]) -> Optional[Tup
     return (dim_method, clust_method, dim_params, clust_params, mean_ari)
 
 
+def _find_best_configs_per_combination(results: List[Dict[str, Any]]) -> List[Tuple[str, str, Dict[str, Any], Dict[str, Any], float]]:
+    """Find best configuration for each (DR method, Clustering method) combination.
+    
+    Args:
+        results: List of experiment result dictionaries
+        
+    Returns:
+        List of tuples: (dim_method, clust_method, dim_params, clust_params, mean_ari)
+    """
+    import pandas as pd
+    
+    # Filter successful results with ARI
+    successful = [
+        r for r in results 
+        if r.get('success') and r.get('evaluation') and 'adjusted_rand_index' in r.get('evaluation', {})
+    ]
+    
+    if not successful:
+        return []
+    
+    # Build dataframe for analysis
+    rows = []
+    for r in successful:
+        rows.append({
+            'dim_method': r.get('dim_reduction_method'),
+            'clust_method': r.get('clustering_method'),
+            'dim_params_str': json.dumps(r.get('dim_reduction_params', {}), sort_keys=True),
+            'clust_params_str': json.dumps(r.get('clustering_params', {}), sort_keys=True),
+            'ari': r['evaluation']['adjusted_rand_index'],
+        })
+    
+    df = pd.DataFrame(rows)
+    
+    # Group by (method, params) and compute mean ARI
+    grouped = df.groupby(['dim_method', 'clust_method', 'dim_params_str', 'clust_params_str'])['ari'].agg(['mean', 'count']).reset_index()
+    
+    # Find best config for each (DR, CL) combination
+    best_configs = []
+    for (dim_method, clust_method), group in grouped.groupby(['dim_method', 'clust_method']):
+        best_idx = group['mean'].idxmax()
+        best_row = group.loc[best_idx]
+        
+        dim_params = json.loads(best_row['dim_params_str'])
+        clust_params = json.loads(best_row['clust_params_str'])
+        mean_ari = float(best_row['mean'])
+        
+        best_configs.append((dim_method, clust_method, dim_params, clust_params, mean_ari))
+    
+    # Sort by mean ARI descending
+    best_configs.sort(key=lambda x: x[4], reverse=True)
+    
+    return best_configs
+
+
 def visualize_best_clusters(
     X: np.ndarray,
     y: Optional[np.ndarray],
@@ -471,6 +525,22 @@ def visualize_best_clusters(
             dim_method, clust_method, 
             output_dir, metric
         )
+        
+        # Save 2D coordinates and associated data
+        np.save(
+            output_dir / f"X_2d_{dim_method}_{clust_method}.npy",
+            X_2d
+        )
+        np.save(
+            output_dir / f"labels_{dim_method}_{clust_method}.npy",
+            labels
+        )
+        if y_sub is not None:
+            np.save(
+                output_dir / f"y_true_{dim_method}_{clust_method}.npy",
+                y_sub
+            )
+        print(f"  Saved 2D coordinates and labels to: X_2d_{dim_method}_{clust_method}.npy")
     
     # 2. Create 3D visualization if requested
     if plot_3d and X_reduced.shape[1] >= 3:
@@ -484,6 +554,13 @@ def visualize_best_clusters(
                 dim_method, clust_method,
                 output_dir
             )
+            
+            # Save 3D coordinates
+            np.save(
+                output_dir / f"X_3d_{dim_method}_{clust_method}.npy",
+                X_3d
+            )
+            print(f"  Saved 3D coordinates to: X_3d_{dim_method}_{clust_method}.npy")
     
     # 3. Create confusion matrix if ground truth available
     if y_sub is not None and len(y_sub) > 0:
@@ -508,6 +585,134 @@ def visualize_best_clusters(
             launch_phy(phy_path, auto_launch=True)
     print(f"  Visualizations saved to: {output_dir}")
     return phy_path or output_dir
+
+
+def visualize_all_best_combinations(
+    X: np.ndarray,
+    y: Optional[np.ndarray],
+    results: List[Dict[str, Any]],
+    output_dir: Path,
+    max_points: int = 50000,
+    plot_3d: bool = False,  # Set to False by default to save time/space
+    use_mean_ari: bool = True,
+) -> None:
+    """Visualize best configuration for each (DR method, Clustering method) combination.
+    
+    Args:
+        X: Feature matrix
+        y: Optional ground truth labels
+        results: List of experiment results
+        output_dir: Output directory
+        max_points: Maximum points to plot (for performance)
+        plot_3d: Whether to create 3D visualizations (default: False to save time)
+        use_mean_ari: If True, use mean ARI across datasets (default)
+    """
+    print("\n[Visualization] Creating plots for best configurations per DR+CL combination...")
+    
+    # Find best config for each combination
+    best_configs = _find_best_configs_per_combination(results)
+    
+    if not best_configs:
+        print("  No successful results to visualize")
+        return
+    
+    print(f"  Found {len(best_configs)} unique DR+CL combinations")
+    
+    # Create subdirectory for individual combination plots
+    combo_dir = output_dir / "best_combinations"
+    combo_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Visualize each best combination
+    for idx, (dim_method, clust_method, dim_params, clust_params, mean_ari) in enumerate(best_configs, 1):
+        print(f"\n  [{idx}/{len(best_configs)}] Visualizing {dim_method} + {clust_method} (mean ARI: {mean_ari:.4f})...")
+        
+        try:
+            # Re-run pipeline for this combination
+            reducer = create_reducer(dim_method, **dim_params)
+            if reducer is None:
+                print(f"    ⚠️  Failed to create reducer: {dim_method}")
+                continue
+            
+            X_reduced = reducer.fit_transform(X, y)
+            if X_reduced is None:
+                print(f"    ⚠️  Dimensionality reduction failed: {dim_method}")
+                continue
+            
+            clusterer = create_clustering(clust_method, **clust_params)
+            if clusterer is None:
+                print(f"    ⚠️  Failed to create clusterer: {clust_method}")
+                continue
+            
+            labels = clusterer.fit_predict(X_reduced)
+            if labels is None:
+                print(f"    ⚠️  Clustering failed: {clust_method}")
+                continue
+            
+            # Subsample if needed
+            n = X_reduced.shape[0]
+            y_sub = y
+            if n > max_points:
+                idx_sample = np.random.choice(n, max_points, replace=False)
+                X_reduced = X_reduced[idx_sample]
+                labels = labels[idx_sample]
+                if y is not None and len(y) == n:
+                    y_sub = y[idx_sample]
+            
+            # Save the DR-reduced data (before PCA to 2D/3D)
+            np.save(combo_dir / f"X_reduced_{dim_method}_{clust_method}.npy", X_reduced)
+            
+            # Determine metric for filename
+            metric = 'adjusted_rand_index' if (y is not None and len(y) > 0) else 'silhouette_score'
+            
+            # Create 2D visualization
+            plot_reducer_2d = create_reducer('PCA', n_components=2)
+            X_2d = plot_reducer_2d.fit_transform(X_reduced, None)
+            
+            if X_2d is not None and X_2d.shape[1] >= 2:
+                _create_2d_plot(
+                    X_2d, labels, y_sub,
+                    dim_method, clust_method,
+                    combo_dir, metric
+                )
+                
+                # Save arrays
+                np.save(combo_dir / f"X_2d_{dim_method}_{clust_method}.npy", X_2d)
+                np.save(combo_dir / f"labels_{dim_method}_{clust_method}.npy", labels)
+                if y_sub is not None:
+                    np.save(combo_dir / f"y_true_{dim_method}_{clust_method}.npy", y_sub)
+            
+            # Create 3D visualization if requested
+            if plot_3d and X_reduced.shape[1] >= 3:
+                plot_reducer_3d = create_reducer('PCA', n_components=3)
+                X_3d = plot_reducer_3d.fit_transform(X_reduced, None)
+                
+                if X_3d is not None and X_3d.shape[1] >= 3:
+                    _create_3d_plot(
+                        X_3d, labels, y_sub,
+                        dim_method, clust_method,
+                        combo_dir
+                    )
+                    
+                    # Save 3D arrays
+                    np.save(combo_dir / f"X_3d_{dim_method}_{clust_method}.npy", X_3d)
+            
+            # Create confusion matrix if ground truth available
+            if y_sub is not None and len(y_sub) > 0:
+                _create_confusion_matrix(
+                    labels, y_sub,
+                    dim_method, clust_method,
+                    combo_dir
+                )
+            
+            print(f"    ✅ Saved visualizations and arrays for {dim_method} + {clust_method}")
+            
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to visualize {dim_method} + {clust_method}: {e}")
+            print(f"    ❌ Failed: {str(e)}")
+            continue
+    
+    print(f"\n  All combination visualizations saved to: {combo_dir}")
 
 
 def _create_2d_plot(
