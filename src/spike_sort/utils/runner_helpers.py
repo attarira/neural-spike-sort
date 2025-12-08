@@ -522,12 +522,30 @@ def _create_2d_plot(
     """Create 2D scatter plots of clusters and ground truth."""
     unique_labels = np.unique(labels)
     
+    # Generate distinct colors for all clusters using a colormap
+    # Use tab20 for up to 20 clusters, otherwise use a larger colormap
+    n_clusters = len(unique_labels[unique_labels != -1])  # Exclude noise label
+    if n_clusters <= 20:
+        cmap = plt.cm.tab20
+    else:
+        cmap = plt.cm.gist_rainbow  # Can handle many clusters
+    
+    # Create color mapping: map each unique label to a color
+    color_map = {}
+    valid_labels = unique_labels[unique_labels != -1]
+    if len(valid_labels) > 0:
+        # Generate evenly spaced colors across the colormap
+        color_indices = np.linspace(0, 1, len(valid_labels)) if len(valid_labels) > 1 else [0.5]
+        for idx, lab in enumerate(valid_labels):
+            color_map[lab] = cmap(color_indices[idx])
+    color_map[-1] = 'lightgray'  # Noise points
+    
     # Plot predicted clusters
     fig, ax = plt.subplots(figsize=(10, 8))
     
     for lab in unique_labels:
         mask = labels == lab
-        color = 'lightgray' if lab == -1 else None
+        color = color_map[lab]
         label = 'Noise' if lab == -1 else f'Cluster {lab}'
         ax.scatter(X_2d[mask, 0], X_2d[mask, 1], 
                   s=8, alpha=0.6, label=label, c=color, edgecolors='none')
@@ -552,10 +570,20 @@ def _create_2d_plot(
         fig2, ax2 = plt.subplots(figsize=(10, 8))
         unique_y = np.unique(y[y != -1])
         
-        for lab in unique_y:
+        # Generate distinct colors for ground truth units
+        n_units = len(unique_y)
+        if n_units <= 20:
+            cmap_gt = plt.cm.tab20
+        else:
+            cmap_gt = plt.cm.gist_rainbow
+        
+        # Generate evenly spaced colors across the colormap
+        color_indices = np.linspace(0, 1, n_units) if n_units > 1 else [0.5]
+        for idx, lab in enumerate(unique_y):
             mask = y == lab
+            color = cmap_gt(color_indices[idx])
             ax2.scatter(X_2d[mask, 0], X_2d[mask, 1], 
-                       s=8, alpha=0.6, label=f'Unit {lab}', edgecolors='none')
+                       s=8, alpha=0.6, label=f'Unit {lab}', c=color, edgecolors='none')
         
         ax2.set_title(f'Ground Truth ({len(unique_y)} units)', 
                      fontsize=14, fontweight='bold')
@@ -584,13 +612,30 @@ def _create_3d_plot(
     """Create 3D scatter plots of clusters and ground truth."""
     unique_labels = np.unique(labels)
     
+    # Generate distinct colors for all clusters using a colormap
+    n_clusters = len(unique_labels[unique_labels != -1])  # Exclude noise label
+    if n_clusters <= 20:
+        cmap = plt.cm.tab20
+    else:
+        cmap = plt.cm.gist_rainbow  # Can handle many clusters
+    
+    # Create color mapping: map each unique label to a color
+    color_map = {}
+    valid_labels = unique_labels[unique_labels != -1]
+    if len(valid_labels) > 0:
+        # Generate evenly spaced colors across the colormap
+        color_indices = np.linspace(0, 1, len(valid_labels)) if len(valid_labels) > 1 else [0.5]
+        for idx, lab in enumerate(valid_labels):
+            color_map[lab] = cmap(color_indices[idx])
+    color_map[-1] = 'lightgray'  # Noise points
+    
     # Plot predicted clusters in 3D
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection='3d')
     
     for lab in unique_labels:
         mask = labels == lab
-        color = 'lightgray' if lab == -1 else None
+        color = color_map[lab]
         label = 'Noise' if lab == -1 else f'Cluster {lab}'
         ax.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
                   s=8, alpha=0.5, label=label, c=color, edgecolors='none')
@@ -615,10 +660,20 @@ def _create_3d_plot(
         ax2 = fig2.add_subplot(111, projection='3d')
         unique_y = np.unique(y[y != -1])
         
-        for lab in unique_y:
+        # Generate distinct colors for ground truth units
+        n_units = len(unique_y)
+        if n_units <= 20:
+            cmap_gt = plt.cm.tab20
+        else:
+            cmap_gt = plt.cm.gist_rainbow
+        
+        # Generate evenly spaced colors across the colormap
+        color_indices = np.linspace(0, 1, n_units) if n_units > 1 else [0.5]
+        for idx, lab in enumerate(unique_y):
             mask = y == lab
+            color = cmap_gt(color_indices[idx])
             ax2.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
-                       s=8, alpha=0.5, label=f'Unit {lab}', edgecolors='none')
+                       s=8, alpha=0.5, label=f'Unit {lab}', c=color, edgecolors='none')
         
         ax2.set_title(f'Ground Truth (3D) - {len(unique_y)} units',
                      fontsize=14, fontweight='bold')
