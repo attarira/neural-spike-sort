@@ -243,11 +243,25 @@ def determine_intrinsic_pca_dim(
 
 
 def _neighbor_candidates(n_samples: int) -> List[int]:
-    if n_samples <= 3:
-        return [2]
-    # Use log-scale heuristics so the graph sparsity adapts to dataset size without grids.
-    base = max(5, int(round(np.log(n_samples))))
-    candidates = sorted({min(base, n_samples - 1), min(base * 2, n_samples - 1)})
+    """Generate neighbor count candidates based on dataset size.
+    
+    Uses log-scale heuristics: log(n) and 2*log(n), with minimum of 5.
+    This adapts graph sparsity to dataset size without hardcoded grids.
+    
+    Args:
+        n_samples: Number of samples in the dataset
+        
+    Returns:
+        List of neighbor counts [log(n), 2*log(n)] with min=5, max=n_samples-1
+    """
+    if n_samples <= 5:
+        return [max(2, n_samples - 1)]
+    
+    log_n = int(round(np.log(n_samples)))
+    base = max(5, log_n)
+    double = max(5, 2 * log_n)
+    
+    candidates = sorted({min(base, n_samples - 1), min(double, n_samples - 1)})
     return [int(c) for c in candidates if c >= 2]
 
 
@@ -413,12 +427,14 @@ def create_dimensionality_grid(
                 if skip_reason:
                     entry = {"n_neighbors": n_nb, "n_components": comp}
                     if method == "DiffusionMaps":
+                        # DiffusionMaps: vary alpha (density normalization) and t (diffusion time)
                         for alpha in (0.5, 1.0):
-                            skipped_configs.append({
-                                "method": method,
-                                "params": {**entry, "alpha": alpha},
-                                "skip_reason": skip_reason
-                            })
+                            for t in (1, 2, 5):  # t=1 local, t=2 intermediate, t=5 global
+                                skipped_configs.append({
+                                    "method": method,
+                                    "params": {**entry, "alpha": alpha, "t": t},
+                                    "skip_reason": skip_reason
+                                })
                     else:
                         skipped_configs.append({
                             "method": method,
@@ -429,8 +445,11 @@ def create_dimensionality_grid(
                     
                 entry = {"n_neighbors": n_nb, "n_components": comp}
                 if method == "DiffusionMaps":
+                    # DiffusionMaps: vary alpha (density normalization) and t (diffusion time)
+                    # t=1: local structure, t=2: intermediate, t=5: more global structure
                     for alpha in (0.5, 1.0):
-                        params.append({**entry, "alpha": alpha})
+                        for t in (1, 2, 5):
+                            params.append({**entry, "alpha": alpha, "t": t})
                 else:
                     params.append(entry)
         config[method] = params
@@ -460,12 +479,16 @@ def create_dimensionality_grid(
         config["TSNE"] = []
 
     # --- UMAP & relatives ---------------------------------------------------
-    umap_neighbors = sorted(set(neighbor_vals + [10, 20, 50]))
-    umap_neighbors = [n for n in umap_neighbors if n < n_samples]
-    if len(umap_neighbors) > 3:
-        umap_neighbors = [umap_neighbors[0], umap_neighbors[len(umap_neighbors) // 2], umap_neighbors[-1]]
+    # Use log-based neighbor values: log(n), 2*log(n), and 4*log(n) for broader coverage
+    log_n = max(5, int(round(np.log(n_samples))))
+    umap_neighbors = sorted(set([
+        min(log_n, n_samples - 1),
+        min(2 * log_n, n_samples - 1),
+        min(4 * log_n, n_samples - 1),  # Larger value for global structure
+    ]))
+    umap_neighbors = [n for n in umap_neighbors if n < n_samples and n >= 2]
     if not umap_neighbors:
-        umap_neighbors = [min(10, max(2, n_samples - 1))]
+        umap_neighbors = [max(2, min(log_n, n_samples - 1))]
     umap_dims = sorted({2, max(2, int(d_star / 2)), max(2, min(3, d_star)), max(2, int(d_star))})
     # Ensure n_components < n_samples for UMAP
     umap_dims = [d for d in umap_dims if d < n_samples]
@@ -579,7 +602,9 @@ def create_clustering_grid(
         for mult, offset in zip(eps_multipliers, (0, 2, 4))
     ]
     if not spectral_neighbors:
-        spectral_neighbors = [15, 20]
+        # Use log-based fallback: log(n) and 2*log(n) with min=5
+        log_n = max(5, int(round(np.log(max(n_samples, 2)))))
+        spectral_neighbors = [log_n, 2 * log_n]
     spectral_values = list(dict.fromkeys(spectral_neighbors))  # preserve order, unique
     if len(spectral_values) == 1:
         spectral_values.append(spectral_values[0])

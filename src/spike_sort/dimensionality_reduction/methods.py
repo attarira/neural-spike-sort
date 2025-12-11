@@ -356,6 +356,7 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                 n_components = min(self.params.get("n_components", 10), 5, n_samples - 2)
                 n_neighbors = min(self.params.get("n_neighbors", 10), n_samples - 1)
                 alpha = self.params.get("alpha", 0.5)
+                t = self.params.get("t", 1)  # Diffusion time (default=1)
 
                 # ---- Explicit degeneracy breaking (critical) ----
                 X_reg = X + 1e-6 * np.random.standard_normal(X.shape)
@@ -379,6 +380,7 @@ class DiffusionMapsReducer(DimensionalityReductionBase):
                         n_evecs=n_components,
                         epsilon=eps,
                         alpha=alpha,
+                        t=t,  # Diffusion time: higher values = more global structure
                     )
 
                     self.model = mydmap
